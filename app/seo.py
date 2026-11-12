@@ -194,7 +194,7 @@ def site_issues(c: dict) -> list[dict]:
     out = []
 
     def add(sev, code, msg, urls=None):
-        out.append({"severity": sev, "code": code, "message": msg, "urls": (urls or [])[:8]})
+        out.append({"severity": sev, "code": code, "message": msg, "urls": (urls or [])[:8], "count": len(urls or [])})
     if not c["https"]:
         add("high", "no_https", "Site is not served over HTTPS")
     if c["robots_blocks_all"]:
@@ -244,7 +244,7 @@ def site_issues(c: dict) -> list[dict]:
 def score(issues: list[dict], n_pages: int) -> int:
     penalty = 0.0
     for i in issues:
-        share = min(1.0, max(1, len(i["urls"])) / max(1, n_pages))
+        share = min(1.0, max(1, i.get("count") or len(i["urls"])) / max(1, n_pages))
         penalty += {"high": 14, "medium": 6, "low": 2}[i["severity"]] * (0.4 + 0.6 * share)
     return max(0, round(100 - penalty))
 

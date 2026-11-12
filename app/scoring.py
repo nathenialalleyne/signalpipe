@@ -54,9 +54,12 @@ def intent_and_recency(signals: list[dict], lead: dict, comp_names: list[str]) -
     age_days = max(0.0, (time.time() - newest) / 86400)
     recency = 100 * 0.5 ** (age_days / HALF_LIFE_DAYS)
     top = sorted(signals, key=lambda s: -INTENT_WEIGHT.get(s["type"], 40))[0]
-    reasons.insert(0, f"{top['type'].replace('_', ' ').title()}: {top['title'][:110]} ({age_days:.0f}d ago)")
-    if len(signals) > 1:
-        reasons.append(f"{len(signals)} signals across {len(kinds)} kinds")
+    age = "today" if age_days < 1 else f"{age_days:.0f}d ago"
+    reasons.insert(0, f"{top['type'].replace('_', ' ').title()}: {top['title'][:110]} ({age})")
+    if len(kinds) > 1:
+        reasons.append(f"{len(signals)} signals of {len(kinds)} different kinds")
+    elif len(signals) > 1:
+        reasons.append(f"{len(signals)} signals of the same kind")
     return min(100.0, intent), recency, reasons
 
 
