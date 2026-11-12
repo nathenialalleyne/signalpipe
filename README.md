@@ -65,6 +65,31 @@ docker compose up -d --build
 Caddy issues the HTTPS certificate for `DOMAIN`. Data lives in the `data` volume; back up
 `/data/signalpipe.db`.
 
+### On AWS Lightsail
+
+1. In the Lightsail console create an instance: Linux, **Ubuntu 24.04**, the 1 GB plan (the 512 MB
+   plan works but builds slowly). Under **Add launch script**, paste the contents of
+   [`deploy/lightsail-launch.sh`](deploy/lightsail-launch.sh). To use your own domain, fill in
+   `DOMAIN=""` at the top of the script first.
+2. On the instance's **Networking** tab, attach a static IP and add a firewall rule for **HTTPS (443)**.
+   Port 80 must stay open too; it is used to issue the certificate.
+3. After about five minutes, open the browser SSH terminal and read the address and generated password:
+
+   ```bash
+   sudo cat /root/signalpipe-info.txt
+   ```
+
+4. Add your keys to `/opt/signalpipe/.env` (see `.env.example`), then apply them:
+
+   ```bash
+   cd /opt/signalpipe && sudo docker compose up -d
+   ```
+
+Without your own domain the script uses a `<ip>.sslip.io` hostname so a certificate can be issued. If
+the page does not load over HTTPS after ten minutes, check `/var/log/signalpipe-setup.log` and
+`sudo docker compose logs caddy`; the usual cause is port 443 still closed, and the fallback is to
+point a domain you own at the static IP and set `DOMAIN` in `.env`.
+
 Local development:
 
 ```bash
@@ -110,8 +135,9 @@ server), reply, bounce and unsubscribe handling, CSV import and the LinkedIn flo
 Unipile's documented responses) are covered by `tests/`.
 
 Written from the vendors' documentation but not yet run against a real account: Claude calls (no API
-key was available), Unipile, Hunter, Twilio Lookup, GitHub stargazers, IMAP polling, and the Docker
-image build.
+key was available), Unipile, Hunter, Twilio Lookup, GitHub stargazers, and IMAP polling.
+The Docker image and the compose stack (app behind Caddy) were built and started locally; certificate
+issuance and the Lightsail launch script have not been run on a real instance.
 
 ## Sending responsibly
 
