@@ -25,9 +25,20 @@ One container, one SQLite file, no build step.
    and extract named people with titles, published emails, phone numbers, the LinkedIn company page and
    the tools running on the site.
 4. **Validation.**
-   - Email: syntax, disposable and role detection, MX lookup, suppression list. Mailbox-level
-     verification needs `HUNTER_API_KEY`, or `SMTP_PROBE=1` on a host with outbound port 25. Without
-     either, a guessed address is labelled "risky, pattern guess" and never shown as verified.
+   - Email: syntax, disposable, role and random-looking address detection, MX lookup, mail provider,
+     suppression list. With `SMTP_PROBE=1` it also does what paid verifiers do: it asks the address's
+     own mail server whether the mailbox exists (without sending anything), detects catch-all domains
+     that accept everything, retries once on greylisting, and tells "this mailbox does not exist"
+     apart from "this server refused to talk to us". For a named person it tries the common address
+     patterns until the server accepts one, remembers that company's pattern, and uses it for
+     colleagues. A personal address published on a company's site teaches the pattern the same way.
+     If no pattern is a real mailbox it stores no address rather than a wrong one.
+     Without probing (or `HUNTER_API_KEY`), a derived address is labelled "risky, pattern guess", or
+     "likely, pattern confirmed" when the company's pattern is known. It is never shown as verified.
+   - Mailbox probing needs outbound port 25. AWS restricts it on Lightsail and EC2 by default; request
+     removal with the "Request to remove email sending limitations" form and ask for reverse DNS on
+     the static IP at the same time, then set `SMTP_HELO` to that hostname. Probes are paced one
+     conversation per domain. Catch-all domains can never be confirmed by any verifier.
    - Phone: libphonenumber validity, line type, region, carrier, timezone and a live business-hours
      window. `TWILIO_*` adds carrier-grade line type.
 5. **Scoring.** `0.5 x fit + 0.3 x intent + 0.2 x recency`. Fit is judged by Claude against your ICP
@@ -43,8 +54,10 @@ One container, one SQLite file, no build step.
      automatically under daily and weekly caps, acceptances release the follow-up, and inbound
      messages stop the sequence.
    - Calls are a dial list sorted by who is in business hours, with outcome logging.
-   - In "Review each step" mode nothing sends until you approve it. In "Send automatically" mode only
-     the first email to a verified address goes out unreviewed.
+   - In "Review each step" mode nothing sends until you approve it. In "Send automatically" mode the
+     first email to a verified address goes out unreviewed, and with LinkedIn connected so does the
+     connection request to a known profile, with the follow-up released when they accept. You still
+     choose which leads to approve.
 8. **SEO.** Crawls your site (robots, sitemap, titles, descriptions, headings, canonicals, thin
    pages, duplicates, broken links, structured data, llms.txt), checks which buyer phrases have no
    page, and writes content briefs from those gaps and from prospect questions in your signals. It does

@@ -327,3 +327,102 @@ def test_seo_page_checks():
     cov = seo.keyword_coverage({"pages": [rep]}, brain.get())
     assert {c["keyword"]: c["status"] for c in cov}["cold email"] == "covered"
     assert {c["keyword"]: c["status"] for c in cov}["HubSpot alternative"] == "missing"
+
+
+# ---------- mailbox verification against a real SMTP conversation ----------
+
+@pytest.fixture
+def mailserver(monkeypatch):
+    """A local mail server that answers RCPT the way real ones do. Domains: real.test, catchall.test."""
+    from aiosmtpd.controller import Controller
+
+    class Handler:
+        rcpts = []
+
+        async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
+            Handler.rcpts.append(address)
+            local, domain = address.split("@")
+            if domain == "catchall.test" or address in ("dreyes@real.test", "kris.beevers@pattern.test"):
+                envelope.rcpt_tos.append(address)
+                return "250 OK"
+            if domain == "blocked.test":
+                return "550 5.7.1 Service unavailable, client host blocked using Spamhaus"
+            if domain == "m365.test":
+                return "550 5.4.1 Recipient address rejected: Access denied"
+            if local == "grey":
+                return "451 4.7.1 Greylisted, try again later"
+            return "550 5.1.1 The email account that you tried to reach does not exist"
+
+    ctl = Controller(Handler(), hostname="127.0.0.1", port=8926)
+    ctl.start()
+    for d in ("real.test", "catchall.test", "blocked.test", "m365.test", "pattern.test"):
+        db.cache_set(f"mx:{d}", ["127.0.0.1"])
+    monkeypatch.setattr(validate, "PROBE_PORT", 8926)
+    monkeypatch.setattr(validate, "PROBE_PAUSE", 0)
+    monkeypatch.setattr(validate, "GREYLIST_WAIT", 0)
+    monkeypatch.setattr(config, "SMTP_PROBE", True)
+    monkeypatch.setattr(config, "HUNTER_API_KEY", "")
+    yield Handler
+    ctl.stop()
+
+
+def test_mailbox_verification_outcomes(mailserver):
+    ok = run(validate.validate_email("dreyes@real.test"))
+    assert ok["status"] == "valid" and "smtp_verified" in ok["flags"]
+    gone = run(validate.validate_email("nobody@real.test"))
+    assert gone["status"] == "invalid" and "rejected" in gone["reason"]
+    ca = run(validate.validate_email("anyone@catchall.test"))
+    assert ca["status"] == "risky" and "catch_all" in ca["flags"]          # accepted, but proves nothing
+    blocked = run(validate.validate_email("dana@blocked.test"))
+    assert blocked["status"] == "risky" and "probe_unavailable" in blocked["flags"]  # refused us, not the mailbox
+    assert run(validate.validate_email("nobody@m365.test"))["status"] == "invalid"   # Microsoft's 5.4.1 means no such recipient
+    grey = run(validate.validate_email("grey@real.test"))
+    assert grey["status"] == "risky" and mailserver.rcpts.count("grey@real.test") == 2  # one retry, then give up
+
+
+def test_find_email_walks_patterns_and_learns(mailserver):
+    found = run(validate.find_email("Dana Reyes", "real.test"))
+    assert found["email"] == "dreyes@real.test" and found["status"] == "valid"
+    assert validate.known_pattern("real.test") == "flast"
+    mailserver.rcpts.clear()
+    nobody = run(validate.find_email("Lee Park", "real.test"))
+    assert mailserver.rcpts[0] == "lpark@real.test"        # learned pattern is tried first
+    assert nobody["email"] == "" and "no_pattern_matched" in nobody["flags"]  # no address beats a wrong one
+    ca = run(validate.find_email("Dana Reyes", "catchall.test"))
+    assert ca["status"] == "risky" and "pattern_guess" in ca["flags"]
+
+
+def test_pattern_learned_from_published_address(monkeypatch):
+    monkeypatch.setattr(config, "SMTP_PROBE", False)
+    db.cache_set("mx:acme.io", ["aspmx.l.google.com"])
+    assert validate.pattern_of("kris.beevers@acme.io", "Kris Beevers") == "first.last"
+    assert validate.pattern_of("info@acme.io", "Kris Beevers") is None
+    guess = run(validate.find_email("Dana Reyes", "acme.io"))
+    assert "pattern_guess" in guess["flags"] and guess["score"] <= 45
+    validate.learn_pattern("acme.io", "kbeevers@acme.io", "Kris Beevers")
+    likely = run(validate.find_email("Dana Reyes", "acme.io"))
+    assert likely["email"] == "dreyes@acme.io" and "pattern_confirmed" in likely["flags"] and likely["score"] == 70
+    assert "mx:google" in likely["flags"]
+
+
+def test_gibberish_and_provider():
+    assert validate.looks_gibberish("xk7q92mzp4") and validate.looks_gibberish("qwrtpsdfgh")
+    assert not validate.looks_gibberish("dana.reyes") and not validate.looks_gibberish("info")
+    assert validate.mail_provider(["acme-io.mail.protection.outlook.com"]) == "microsoft"
+
+
+def test_hands_off_linkedin_queues_invite_only_for_known_profiles(li):
+    run(linkedin.refresh_account())
+    db.set_setting("send_mode", "auto")
+    lid = seed_lead(make_play())
+    run(outreach.draft_sequence(lid))
+    assert db.one("SELECT status FROM messages WHERE channel='linkedin' AND step=1")["status"] == "queued"
+    assert db.one("SELECT status FROM messages WHERE channel='linkedin' AND step=2")["status"] == "draft"  # waits for acceptance
+    assert run(linkedin.send_next()) == {"sent": 1, "step": 1}
+    li.relations = [{"member_id": "ACoDANA", "public_identifier": "dana-x"}]
+    run(linkedin.sync())
+    assert db.one("SELECT status FROM messages WHERE channel='linkedin' AND step=2")["status"] == "queued"  # released automatically
+    lid2 = seed_lead(make_play(), email="bo@acme.io",
+                     linkedin_url="https://www.linkedin.com/search/results/people/?keywords=VP%20Sales%20Acme")
+    run(outreach.draft_sequence(lid2))
+    assert db.one("SELECT status FROM messages WHERE lead_id=? AND channel='linkedin' AND step=1", (lid2,))["status"] == "draft"

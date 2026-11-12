@@ -158,9 +158,15 @@ async def draft_sequence(lead_id: int, channels: list[str] | None = None, replac
                   now + 86400 * EMAIL_STEP_DAYS[i], now))
             made.append(f"email{i}")
     if "linkedin" in channels and (c.get("linkedin_url") or lead.get("linkedin_company_url")):
+        from . import linkedin
+        # Hands-off: in automatic mode with an account connected, the invite goes out without review,
+        # but only to a known profile. A search link still needs a person to pick the right result.
+        has_profile = "linkedin.com/in/" in (c.get("linkedin_url") or "")
+        li_auto = mode == "auto" and linkedin.enabled() and has_profile and not c.get("do_not_contact")
         db.x("INSERT INTO messages(lead_id,contact_id,channel,step,subject,body,status,scheduled_at,created_at) "
              "VALUES(?,?,?,?,?,?,?,?,?)",
-             (lead_id, cid, "linkedin", 1, "Connection request", seq["linkedin_note"][:LINKEDIN_NOTE_MAX], "draft", now, now))
+             (lead_id, cid, "linkedin", 1, "Connection request", seq["linkedin_note"][:LINKEDIN_NOTE_MAX],
+              "queued" if li_auto else "draft", now, now))
         db.x("INSERT INTO messages(lead_id,contact_id,channel,step,subject,body,status,scheduled_at,created_at) "
              "VALUES(?,?,?,?,?,?,?,?,?)",
              (lead_id, cid, "linkedin", 2, "After they accept", seq["linkedin_followup"], "draft", now + 86400 * 2, now))

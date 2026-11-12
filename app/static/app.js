@@ -33,8 +33,9 @@ const sigPill = (t) => { const [l, c] = SIG[t] || [t || 'Signal', '']; return `<
 const scoreBox = (raw) => { const n = Math.round(raw); const c = n >= 65 ? 'hi' : n >= 45 ? 'mid' : 'lo'; const w = n >= 65 ? 'Strong' : n >= 45 ? 'Fair' : 'Weak'; return `<div class="score ${c}"><b>${n}</b><span>${w}</span></div>`; };
 const emailPill = (st, detail) => {
   if (!st) return '';
-  const guess = (detail?.flags || []).includes('pattern_guess');
-  const m = { valid: ['Valid', 'mint'], risky: [guess ? 'Risky, pattern guess' : 'Risky', 'butter'], invalid: ['Invalid', 'blush'], unknown: ['Unchecked', ''] }[st] || [st, ''];
+  const f = detail?.flags || [];
+  const risky = f.includes('pattern_confirmed') ? 'Likely, pattern confirmed' : f.includes('pattern_guess') ? 'Risky, pattern guess' : f.includes('catch_all') ? 'Risky, accepts all mail' : 'Risky';
+  const m = { valid: [f.includes('smtp_verified') ? 'Valid, mailbox confirmed' : 'Valid', 'mint'], risky: [risky, 'butter'], invalid: ['Invalid', 'blush'], unknown: ['Unchecked', ''] }[st] || [st, ''];
   return `<span class="pill ${m[1]}" title="${esc(detail?.reason || '')}">${esc(m[0])}</span>`;
 };
 const phonePill = (d) => {
@@ -254,7 +255,8 @@ async function viewSettings() {
     ${rowS(c.llm, 'Claude', `Scoring and writing with ${c.llm_model}`, 'Keyword scoring and template messages only', 'ANTHROPIC_API_KEY')}
     ${rowS(c.smtp, 'Outgoing mail', `Up to ${c.email_daily_cap} a day from your mailbox`, 'Approved emails will wait', 'SMTP_HOST SMTP_USER SMTP_PASS SMTP_FROM')}
     ${rowS(c.imap, 'Reply detection', 'Replies stop sequences automatically', 'Replies will not be detected', 'IMAP_HOST IMAP_USER IMAP_PASS')}
-    ${rowS(c.hunter, 'Email finder and verifier', 'Hunter finds named contacts and verifies mailboxes', 'Addresses are pattern guesses checked against DNS only', 'HUNTER_API_KEY')}
+    ${rowS(c.smtp_probe, 'Mailbox verification', 'Each address is confirmed with its own mail server', 'Needs outbound port 25, which most clouds block until you ask', 'SMTP_PROBE=1')}
+    ${rowS(c.hunter, 'Hunter', 'Finds named contacts and verifies mailboxes for you', 'Optional paid alternative to the built-in verification', 'HUNTER_API_KEY')}
     ${rowS(c.twilio_lookup, 'Carrier phone lookup', 'Twilio confirms line type per number', 'Line type comes from the number plan only', 'TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN')}
     ${rowS(c.postal_address, 'Postal address in footer', 'Included in every email', 'Required by US law for commercial email', 'POSTAL_ADDRESS')}
     ${rowS(c.auth, 'Password', 'Sign-in required', 'Anyone who can reach this address can use it', 'APP_PASSWORD')}</ul>
@@ -300,7 +302,7 @@ const A = {
   },
   outTab: (id) => { S.outTab = id; return render(); },
   outDone: (id) => { S.outDone = id === '1'; return render(); },
-  mode: async (id) => { await api('/settings', { method: 'PUT', body: { send_mode: id } }); toast(id === 'auto' ? 'First emails to verified addresses now send without review.' : 'Every step waits for your review.'); return render(); },
+  mode: async (id) => { await api('/settings', { method: 'PUT', body: { send_mode: id } }); toast(id === 'auto' ? 'First emails to verified addresses and LinkedIn invites to known profiles now send without review.' : 'Every step waits for your review.'); return render(); },
   msg: async (id, btn) => { await api('/messages/' + id, { method: 'PUT', body: { ...(await saveField(id)), action: btn.dataset.do } }); return render(); },
   outcome: async (id, btn) => { await api('/messages/' + id, { method: 'PUT', body: { ...(await saveField(id)), action: 'done', outcome: btn.dataset.do } }); return render(); },
   copy: async (id) => { const el = root.querySelector(`[data-field="body"][data-id="${id}"]`); await navigator.clipboard.writeText(el ? el.value : ''); toast('Copied.'); },

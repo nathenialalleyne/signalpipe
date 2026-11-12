@@ -353,19 +353,14 @@ async def enrich_lead(lead_id: int) -> dict:
     main_phone = next((p for p in site["phones"]), None)
     added = 0
 
-    async def add(name, title, email, source, linkedin="", phone=None, guessed=False):
+    async def add(name, title, email, source, linkedin="", phone=None, detail=None):
         nonlocal added
+        if detail is not None:
+            email = detail.get("email") or ""
         if (name and name.lower() in existing) or (email and email in existing_emails):
             return
-        detail = {"status": None}
-        if email:
-            detail = await validate.validate_email(email)
-            if guessed and detail["status"] != "invalid":
-                # A pattern guess is only as good as the mail server's answer; never present it as verified.
-                detail["flags"].append("pattern_guess")
-                if detail["status"] != "valid":
-                    detail.update(status="risky", score=min(detail["score"], 45),
-                                  reason="guessed from the common first.last pattern; " + detail["reason"])
+        if detail is None:
+            detail = await validate.validate_email(email) if email else {"status": None}
         if phone and phone.get("e164"):
             tw = await validate.twilio_line_type(phone["e164"])
             if tw:
@@ -384,11 +379,26 @@ async def enrich_lead(lead_id: int) -> dict:
         for h in await hunter_domain(domain):
             ph = validate.validate_phone(h["phone"], validate.region_for_domain(domain)) if h["phone"] else None
             await add(h["name"], h["title"], h["email"], "hunter", h["linkedin_url"], ph if ph and ph["valid"] else None)
+    # A personal address published on the site reveals the company's pattern and is real, not a guess.
+    published: dict[str, str] = {}
+    for e in site["emails"]:
+        if domain and e.split("@")[-1] == domain:
+            for p in site["people"]:
+                if validate.pattern_of(e, p["name"]):
+                    validate.learn_pattern(domain, e, p["name"])
+                    published[p["name"].lower()] = e
     for p in rank_people(site["people"], b["icp"]["titles"])[:6]:
-        cands = validate.email_candidates(p["name"], domain) if domain else []
-        await add(p["name"], p["title"], cands[0] if cands else "", "website", p.get("linkedin_url", ""),
-                  main_phone, guessed=True)
+        real = published.get(p["name"].lower())
+        if real:
+            await add(p["name"], p["title"], real, "website", p.get("linkedin_url", ""), main_phone)
+        elif domain:
+            found = await validate.find_email(p["name"], domain)
+            await add(p["name"], p["title"], "", "website", p.get("linkedin_url", ""), main_phone, detail=found)
+        else:
+            await add(p["name"], p["title"], "", "website", p.get("linkedin_url", ""), main_phone)
     for e in site["emails"][:3]:
+        if e in published.values():
+            continue
         if e.split("@")[-1] == domain or not domain:
             await add("", "Company inbox", e, "website", site["linkedin_company_url"], main_phone)
     if not added and not existing and main_phone:
