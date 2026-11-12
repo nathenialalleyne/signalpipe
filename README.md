@@ -154,9 +154,20 @@ then on. To let it sign in by itself when the session expires, also set `LINKEDI
 not to the Signalpipe server, not into any file the agent writes.
 
 It works while your computer is on and the agent is running; steps approved while it is off go out
-when it next starts. If LinkedIn shows a security check, the agent stops, tells the app, and waits for
-you to sign in again. It does not try to get past the check, and it does not disguise itself as a
-non-automated browser, so LinkedIn can tell if it looks.
+when it next starts.
+
+By default the agent starts your ordinary Chrome as a normal window and attaches to it, so the
+browser is not running in the automation mode that pages can see. It works the page the way you
+would: it moves the pointer to a button before pressing it, types at a human pace, glances down a
+profile before acting, and leaves minutes between sends. What it will not do: if LinkedIn shows a
+security check it stops, tells the app, and waits for you to sign in again; it never tries to get
+past a check, and it never changes what the browser reports about your device, network or identity.
+None of this is a guarantee. LinkedIn also judges accounts on behaviour (volume, pending invites,
+acceptance rate), and this has not been run against LinkedIn itself.
+
+Set `LINKEDIN_CHROME_PATH` if Chrome is not in its usual place. `LINKEDIN_MODE=launch` makes the
+automation library start the browser instead; that mode is for the tests and is visibly automated.
+`LINKEDIN_DEBUG=1` prints each step with timings.
 
 The agent finds buttons by their English labels ("Connect", "Add a note", "Send", "Message"), all
 defined in one table at the top of the file. It has been tested end to end against a stand-in site

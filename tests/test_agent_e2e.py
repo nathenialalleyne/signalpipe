@@ -2,6 +2,7 @@
 LinkedIn site. Proves the agent's logic, pacing rules and protocol. It cannot prove that LinkedIn's own
 pages match the stand-in; that needs a run against a real account.
 """
+import glob
 import os
 import shutil
 import subprocess
@@ -30,8 +31,16 @@ def wait_http(url, tries=60):
     raise RuntimeError(f"{url} did not come up")
 
 
-@pytest.fixture(scope="module")
-def stack(tmp_path_factory):
+CHROME = next(iter(sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux64/chrome")) or
+                   [shutil.which("google-chrome") or shutil.which("chromium") or ""]), "")
+
+
+# launch: the automation library owns the browser. attach: an ordinary Chrome process the agent connects to,
+# which is how the agent runs on a real computer.
+@pytest.fixture(scope="module", params=["launch", "attach"])
+def stack(request, tmp_path_factory):
+    if request.param == "attach" and not CHROME:
+        pytest.skip("no Chrome binary for attach mode")
     tmp = tmp_path_factory.mktemp("e2e")
     env = {**os.environ, "SIGNALPIPE_DATA": str(tmp / "data"), "API_TOKEN": "tok", "APP_PASSWORD": "pw",
            "SIGNALPIPE_LLM": "0", "SIGNALPIPE_SCHEDULER": "0", "LINKEDIN_HOURS": "0-24", "LINKEDIN_WEEKENDS": "1",
@@ -43,10 +52,11 @@ def stack(tmp_path_factory):
     try:
         wait_http(f"http://127.0.0.1:{FAKE}/_state")
         wait_http(f"http://127.0.0.1:{APP}/healthz")
-        yield {"profile": str(tmp / "chrome"), "errors": str(tmp / "errors")}
+        yield {"profile": str(tmp / "chrome"), "errors": str(tmp / "errors"), "mode": request.param}
     finally:
-        fake.terminate()
-        app.terminate()
+        for proc in (fake, app):
+            proc.terminate()
+            proc.wait(timeout=10)
 
 
 def api(method, path, **kw):
@@ -62,10 +72,20 @@ def fake_state():
 def agent(stack, *args, timeout=150):
     env = {**os.environ, "SIGNALPIPE_URL": f"http://127.0.0.1:{APP}", "SIGNALPIPE_TOKEN": "tok",
            "LINKEDIN_BASE": f"http://127.0.0.1:{FAKE}", "LINKEDIN_CHANNEL": "", "LINKEDIN_HEADLESS": "1",
+           "LINKEDIN_MODE": stack["mode"], "LINKEDIN_DEBUG": "1", "LINKEDIN_CHROME_PATH": CHROME, "LINKEDIN_CHROME_ARGS": "--no-sandbox",
            "LINKEDIN_SPEED": "0.02", "LINKEDIN_PROFILE_DIR": stack["profile"], "LINKEDIN_ERROR_DIR": stack["errors"],
            "LINKEDIN_EMAIL": "me@example.com", "LINKEDIN_PASSWORD": "correct-horse"}
-    return subprocess.run(["node", os.path.join(ROOT, "agent", "linkedin-agent.mjs"), *args], env=env,
-                          capture_output=True, text=True, timeout=timeout)
+    try:
+        run = subprocess.run(["node", os.path.join(ROOT, "agent", "linkedin-agent.mjs"), *args], env=env,
+                             capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        run = None
+        out = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+    if os.environ.get("E2E_LOG"):
+        with open(os.environ["E2E_LOG"], "a") as f:
+            f.write(f"\n=== {stack['mode']} {' '.join(args)}\n" + (run.stdout if run else out + "\n[TIMED OUT]"))
+    assert run is not None, "agent timed out"
+    return run
 
 
 def import_and_approve(play_id, rows):
@@ -160,7 +180,7 @@ def test_agent_runs_linkedin_end_to_end(stack):
     import_and_approve(pid, ["Lim Itt,Capped,COO,https://www.linkedin.com/in/limit-user,capped.invalid"])
     run = agent(stack, "run", "--max-work", "3", "--exit-on-idle")
     assert run.returncode == 0, run.stdout[-1500:]
-    assert api("GET", "/status")["linkedin"]["paused_until"] > time.time() + 19 * 3600
+    assert api("GET", "/status")["linkedin"]["paused_until"] > time.time() + 19 * 3600, run.stdout[-1200:]
     assert linkedin_steps("open")[("Lim Itt", 1)]["status"] == "queued"
     assert "limit-user" not in {i["slug"] for i in fake_state()["invites"]}
     assert "paused" in api("GET", "/agent/linkedin/work")["reason"]

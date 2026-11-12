@@ -8,8 +8,10 @@
  *
  * It asks the Signalpipe server for one unit of work at a time (send an invite, send a follow-up, check
  * who accepted, check for replies, read a watched page) and reports back. The server decides pacing and
- * caps. The agent never hides that it is automated and never tries to get past a LinkedIn verification
- * step: if LinkedIn asks you to verify, it stops and waits for you.
+ * caps. By default the agent starts your ordinary Chrome as a normal window and works in it at a person's
+ * pace, moving the pointer and typing the way you would. It never tries to get past a LinkedIn verification
+ * step (if LinkedIn asks you to verify, it stops and waits for you), and it never changes what the browser
+ * reports about your device, your network or who you are.
  *
  * Your LinkedIn password, if you set one, is read from this machine's environment, typed into LinkedIn's
  * own sign-in page, and sent nowhere else.
@@ -17,6 +19,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const env = process.env;
@@ -26,7 +30,12 @@ const cfg = {
   base: (env.LINKEDIN_BASE || 'https://www.linkedin.com').replace(/\/$/, ''),
   profileDir: env.LINKEDIN_PROFILE_DIR || path.join(os.homedir(), '.signalpipe', 'chrome-profile'),
   errorDir: env.LINKEDIN_ERROR_DIR || path.join(os.homedir(), '.signalpipe', 'errors'),
-  channel: env.LINKEDIN_CHANNEL ?? 'chrome',      // your installed Chrome; set to '' to use Playwright's Chromium
+  // attach: start your ordinary Chrome as a normal window and work in it (default).
+  // launch: let the automation library start and own the browser (used by the tests).
+  mode: env.LINKEDIN_MODE || 'attach',
+  chromePath: env.LINKEDIN_CHROME_PATH || '',
+  chromeArgs: (env.LINKEDIN_CHROME_ARGS || '').split(' ').filter(Boolean),
+  channel: env.LINKEDIN_CHANNEL ?? 'chrome',      // launch mode only: '' uses Playwright's Chromium
   headless: env.LINKEDIN_HEADLESS === '1',
   allowNoNote: env.LINKEDIN_ALLOW_NO_NOTE !== '0', // free accounts get few noted invites a month
   email: env.LINKEDIN_EMAIL || '',
@@ -39,6 +48,7 @@ const opt = (name, d) => { const i = args.indexOf(name); return i >= 0 ? args[i 
 
 class Blocked extends Error {}
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const dbg = (...a) => { if (env.LINKEDIN_DEBUG) console.log(new Date().toISOString().slice(11, 23), '  ·', ...a); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms * cfg.speed)));
 const pause = (a = 1200, b = 3200) => sleep(a + Math.random() * (b - a));
 const slugOf = (url) => { const m = /\/in\/([^/?#]+)/.exec(url || ''); return m ? decodeURIComponent(m[1]) : ''; };
@@ -68,14 +78,100 @@ async function api(method, route, body) {
   return r.json();
 }
 
+function findChrome() {
+  if (cfg.chromePath) return cfg.chromePath;
+  const places = process.platform === 'darwin' ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    : process.platform === 'win32' ? [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter(Boolean)
+      .map((d) => path.join(d, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
+  return places.find((f) => fs.existsSync(f)) || '';
+}
+
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = net.createServer();
+  srv.on('error', reject);
+  srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+});
+
+/** Returns { ctx, close }. The Chrome profile in cfg.profileDir holds your LinkedIn session between runs. */
 async function launch(headless = cfg.headless) {
   const load = createRequire(import.meta.url);
   let pw;
   try { pw = load('playwright-core'); } catch { pw = load('playwright'); }
   fs.mkdirSync(cfg.profileDir, { recursive: true });
-  return pw.chromium.launchPersistentContext(cfg.profileDir, {
-    headless, viewport: { width: 1280, height: 900 }, ...(cfg.channel ? { channel: cfg.channel } : {}),
-  });
+  if (cfg.mode === 'launch') {
+    const ctx = await pw.chromium.launchPersistentContext(cfg.profileDir, {
+      headless, viewport: { width: 1280, height: 900 }, ...(cfg.channel ? { channel: cfg.channel } : {}),
+    });
+    return { ctx, close: () => ctx.close() };
+  }
+  const exe = findChrome();
+  if (!exe) throw new Error('Could not find Chrome. Set LINKEDIN_CHROME_PATH to its location.');
+  const port = await freePort();  // reachable from this computer only
+  // The three "disable" switches stop Chrome from slowing the page down when its window is behind others,
+  // which otherwise makes the agent stall whenever you are working in another app.
+  const child = spawn(exe, [`--remote-debugging-port=${port}`, `--user-data-dir=${cfg.profileDir}`, '--no-first-run',
+    '--no-default-browser-check', '--window-size=1280,900', '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
+    ...(headless ? ['--headless=new'] : []), ...cfg.chromeArgs, 'about:blank'],
+  { stdio: 'ignore' });
+  let up = false;
+  for (let i = 0; i < 120 && !up && child.exitCode === null; i++) {
+    try { up = (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; } catch { await new Promise((r) => setTimeout(r, 250)); }
+  }
+  if (!up) { child.kill(); throw new Error('Chrome did not start. Is another agent already running with this profile?'); }
+  const browser = await pw.chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const close = async () => {
+    try { await (await browser.newBrowserCDPSession()).send('Browser.close'); } catch { /* already gone */ }
+    await Promise.race([new Promise((r) => child.once('exit', r)), new Promise((r) => setTimeout(r, 5000))]);
+    if (child.exitCode === null) child.kill();
+  };
+  return { ctx: browser.contexts()[0], close };
+}
+
+/** The tab the agent works in. In attach mode Chrome may reopen with several tabs; a background tab is slowed
+ *  down by Chrome, so open a fresh one, bring it to the front and close the leftovers. */
+async function workPage(ctx) {
+  const old = ctx.pages();
+  if (cfg.mode === 'launch') return old[0] || ctx.newPage();
+  const page = await ctx.newPage();
+  for (const p of old) await p.close().catch(() => {});
+  await page.bringToFront().catch(() => {});
+  return page;
+}
+
+// Work the page the way a person does: move the pointer to the control, pause, press.
+const pointer = { x: 300 + Math.random() * 300, y: 200 + Math.random() * 200 };
+async function click(locator) {
+  const page = locator.page();
+  await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+  const box = await locator.boundingBox().catch(() => null);
+  if (!box) return locator.click();
+  const px = box.width * (0.25 + Math.random() * 0.5), py = box.height * (0.3 + Math.random() * 0.4);
+  const tx = box.x + px, ty = box.y + py;
+  const bend = { x: (pointer.x + tx) / 2 + (Math.random() - 0.5) * 120, y: (pointer.y + ty) / 2 + (Math.random() - 0.5) * 120 };
+  const steps = 12 + Math.floor(Math.random() * 14);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps, u = 1 - t;
+    await page.mouse.move(u * u * pointer.x + 2 * u * t * bend.x + t * t * tx, u * u * pointer.y + 2 * u * t * bend.y + t * t * ty);
+    await sleep(5 + Math.random() * 14);
+  }
+  pointer.x = tx; pointer.y = ty;
+  await sleep(90 + Math.random() * 220);
+  const t0 = Date.now();
+  try {
+    return await locator.click({ position: { x: px, y: py }, delay: (40 + Math.random() * 80) * cfg.speed, timeout: 12000 });
+  } finally { if (Date.now() - t0 > 2000) dbg(`slow click (${Date.now() - t0} ms) on`, String(locator).slice(0, 110)); }
+}
+
+/** Glance down the page and back, as you would before acting on a profile. */
+async function look(page) {
+  for (let i = 0, n = 1 + Math.floor(Math.random() * 3); i < n; i++) {
+    await page.mouse.wheel(0, 250 + Math.random() * 500);
+    await pause(700, 2200);
+  }
+  await page.mouse.wheel(0, -4000);
+  await pause(500, 1200);
 }
 
 const onBlockedPage = (page) => T.blockedPath.test(new URL(page.url()).pathname);
@@ -89,7 +185,7 @@ async function signIn(page, waitForHumanMs = 0) {
       await user.fill(cfg.email);
       await page.locator('#password, input[name="session_password"]').first().fill(cfg.password);
       await pause(400, 900);
-      await page.locator('button[type="submit"]').first().click();
+      await click(page.locator('button[type="submit"]').first());
       await page.waitForLoadState('domcontentloaded').catch(() => {});
       await pause(1500, 2500);
     }
@@ -148,19 +244,23 @@ async function closeDialogs(page) {
 
 async function invite(page, task) {
   await go(page, profileUrl(task.profile_url));
+  dbg('profile loaded');
+  await look(page);
   const st = await profileState(page);
+  dbg('state', JSON.stringify(st));
   if (st.degree === 1) return { outcome: 'already_connected' };
   if (st.pending) return { outcome: 'already_pending' };
   let btn = visibleButton(topCard(page), T.connect).first();
   if (!(await btn.count())) {
     if (!st.more) return { outcome: 'no_connect_button', detail: 'profile offers no Connect action' };
-    await visibleButton(topCard(page), T.more).first().click();
+    await click(visibleButton(topCard(page), T.more).first());
     await pause(500, 1200);
     btn = page.locator('[role="menu"], .artdeco-dropdown__content').getByRole('button', { name: T.connect })
       .or(page.getByRole('menuitem', { name: T.connect })).filter({ visible: true }).first();
     if (!(await btn.count())) { await page.keyboard.press('Escape'); return { outcome: 'no_connect_button', detail: 'not in the More menu either' }; }
   }
-  await btn.click();
+  await click(btn);
+  dbg('pressed connect');
   await pause(800, 1800);
   const dialog = page.getByRole('dialog').filter({ visible: true }).last();
   try { await dialog.waitFor({ timeout: 10000 }); } catch { return { outcome: 'error', detail: 'no invitation dialog appeared' }; }
@@ -172,34 +272,41 @@ async function invite(page, task) {
   if (task.note) {
     const add = visibleButton(dialog, T.addNote).first();
     if (await add.count()) {
-      await add.click();
+      await click(add);
       await pause(500, 1200);
       const box = page.getByRole('dialog').filter({ visible: true }).last().locator('textarea').first();
-      if (await box.count()) { await typeText(box, task.note); withNote = true; await pause(600, 1400); }
+      if (await box.count()) { await typeText(box, task.note); withNote = true; dbg('note typed'); await pause(600, 1400); }
     }
     if (!withNote && !cfg.allowNoNote) { await closeDialogs(page); return { outcome: 'note_unavailable', detail: 'could not add a note' }; }
   }
   const live = page.getByRole('dialog').filter({ visible: true }).last();
   const send = visibleButton(live, withNote ? T.sendInvite : T.sendNoNote).or(visibleButton(live, T.sendInvite)).first();
   if (!(await send.count()) || await send.isDisabled()) { await closeDialogs(page); return { outcome: 'error', detail: 'no usable Send button in the dialog' }; }
-  await send.click();
-  await pause(1500, 3000);
-  const after = page.getByRole('dialog').filter({ visible: true });
-  if (await after.count()) {
-    const t = await after.last().innerText();
-    await closeDialogs(page);
-    if (T.limit.test(t)) return { outcome: 'limit', detail: t.slice(0, 120) };
+  await click(send);
+  dbg('pressed send');
+  // Wait for LinkedIn's answer instead of guessing a delay: either a limit warning, or the button turning to Pending.
+  let pending = false;
+  for (let i = 0; i < 40 && !pending; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    const open = page.getByRole('dialog').filter({ visible: true });
+    if (await open.count().catch(() => 0)) {
+      const t = await open.last().innerText().catch(() => '');
+      if (T.limit.test(t)) { await closeDialogs(page); return { outcome: 'limit', detail: t.replace(/\s+/g, ' ').slice(0, 120) }; }
+    } else {
+      pending = (await visibleButton(topCard(page), T.pending).count().catch(() => 0)) > 0;
+    }
   }
-  const now = await profileState(page);
-  if (!now.pending) return { outcome: 'unverified', detail: 'sent, but the profile does not show Pending' };
+  await closeDialogs(page);
+  if (!pending) return { outcome: 'unverified', detail: 'sent, but the profile does not show Pending' };
   return { outcome: withNote || !task.note ? 'sent' : 'sent_without_note' };
 }
 
 async function openThread(page, url) {
   await go(page, profileUrl(url));
+  await look(page);
   const st = await profileState(page);
   if (st.degree !== 1 || !st.message) return null;  // never message someone who has not accepted
-  await visibleButton(topCard(page), T.message).first().click();
+  await click(visibleButton(topCard(page), T.message).first());
   const box = page.locator('[role="textbox"][contenteditable="true"]').filter({ visible: true }).last();
   await box.waitFor({ timeout: 15000 });
   await pause(700, 1500);
@@ -215,18 +322,20 @@ const threadTexts = (page) => page.evaluate(() => {
 
 async function closeThread(page) {
   const close = page.getByRole('button', { name: /^Close your (conversation|draft)/i }).filter({ visible: true });
-  if (await close.count()) await close.first().click().catch(() => {});
+  if (await close.count()) await click(close.first()).catch((e) => dbg('close thread failed:', e.message.split('\n')[0]));
 }
 
 async function message(page, task) {
   const box = await openThread(page, task.profile_url);
   if (!box) return { outcome: 'not_connected' };
-  await box.click();
+  dbg('thread open');
+  await click(box);
   await typeText(box, task.text);
+  dbg('message typed');
   await pause(600, 1500);
   const send = page.getByRole('button', { name: T.send }).filter({ visible: true }).last();
   if (!(await send.count()) || await send.isDisabled()) { await closeThread(page); return { outcome: 'error', detail: 'Send button missing or disabled' }; }
-  await send.click();
+  await click(send);
   await pause(1200, 2500);
   const left = (await box.innerText().catch(() => '')).trim();
   await closeThread(page);
@@ -308,12 +417,12 @@ async function collect(page, task) {
         const post = posts.nth(i);
         const postText = (await post.innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
         const expand = post.getByRole('button', { name: /\d[\d,]* comments?/i }).filter({ visible: true }).first();
-        if (await expand.count()) { await expand.click().catch(() => {}); await pause(900, 1800); }
+        if (await expand.count()) { await click(expand).catch(() => {}); await pause(900, 1800); }
         await post.evaluate((el, n) => el.setAttribute('data-sp-post', n), String(i));
         for (const c of await harvest(page, `[data-sp-post="${i}"] [class*="comment"]`)) add(c, { action: 'comment', watched, post_text: postText, comment: c.text });
         const reacts = post.getByRole('button', { name: /reaction/i }).filter({ visible: true }).first();
         if (await reacts.count()) {
-          await reacts.click().catch(() => {});
+          await click(reacts).catch(() => {});
           await pause(900, 1800);
           if (await page.getByRole('dialog').filter({ visible: true }).count()) {
             for (const r of await harvest(page, '[role="dialog"]')) add(r, { action: 'reaction', watched, post_text: postText });
@@ -360,33 +469,34 @@ async function ensureSignedIn(page, interactive) {
 }
 
 async function cmdLogin() {
-  const ctx = await launch(cfg.headless);  // headless sign-in only makes sense with a saved username and password
-  const page = ctx.pages()[0] || await ctx.newPage();
+  const { ctx, close } = await launch(cfg.headless);  // headless sign-in only makes sense with a saved username and password
+  const page = await workPage(ctx);
   log(cfg.email ? 'Signing in with the saved username and password.' : 'Sign in to LinkedIn in the window that opened.');
   log('If LinkedIn asks for a code or a check, complete it there. Waiting up to 10 minutes.');
   const ok = await ensureSignedIn(page, true);
   if (ok && cfg.server) await api('POST', '/result', { kind: 'ready' }).catch((e) => log('signed in, but could not tell Signalpipe:', e.message));
   log(ok ? 'Signed in. You can now start the agent with: node linkedin-agent.mjs run' : 'Still not signed in; nothing was changed.');
-  await ctx.close();
+  await close();
   process.exit(ok ? 0 : 2);
 }
 
 async function cmdDoctor(url) {
-  const ctx = await launch();
-  const page = ctx.pages()[0] || await ctx.newPage();
+  const { ctx, close } = await launch();
+  const page = await workPage(ctx);
   try {
     await go(page, profileUrl(url));
-    console.log(JSON.stringify({ url: page.url(), ...(await profileState(page)), screenshot: await snapshot(page, 'doctor') }, null, 2));
+    const flagged = await page.evaluate(() => navigator.webdriver);
+    console.log(JSON.stringify({ url: page.url(), mode: cfg.mode, browser_says_automated: flagged, ...(await profileState(page)), screenshot: await snapshot(page, 'doctor') }, null, 2));
   } catch (e) { console.log(JSON.stringify({ error: e.message, url: page.url(), screenshot: await snapshot(page, 'doctor') }, null, 2)); }
-  await ctx.close();
+  await close();
 }
 
 async function cmdRun() {
   if (!cfg.server || !cfg.token) { console.error('Set SIGNALPIPE_URL and SIGNALPIPE_TOKEN first.'); process.exit(1); }
   const maxWork = Number(opt('--max-work', Infinity));
-  const ctx = await launch();
-  const page = ctx.pages()[0] || await ctx.newPage();
-  const stop = async (code) => { await ctx.close().catch(() => {}); process.exit(code); };
+  const { ctx, close } = await launch();
+  const page = await workPage(ctx);
+  const stop = async (code) => { await close().catch(() => {}); process.exit(code); };
   process.on('SIGINT', () => stop(0));
   // First run, or the session ended: the window is on LinkedIn's sign-in page. Sign in there once and the
   // agent carries on by itself; the session is kept in its own Chrome profile for next time.
