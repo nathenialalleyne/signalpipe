@@ -83,20 +83,118 @@ async def mx_hosts(domain: str) -> list[str] | None:
     return hosts
 
 
+MAIL_PROVIDERS = (
+    ("google", ("google.com", "googlemail.com")), ("microsoft", ("outlook.com",)),
+    ("proofpoint", ("pphosted.com",)), ("mimecast", ("mimecast.com",)), ("zoho", ("zoho.com", "zoho.eu")),
+    ("barracuda", ("barracudanetworks.com",)), ("fastmail", ("messagingengine.com",)),
+)
+USER_UNKNOWN = re.compile(r"user unknown|no such user|does not exist|unknown recipient|"
+                          r"recipient (address )?rejected|invalid recipient|mailbox (not found|unavailable)|no mailbox", re.I)
+SENDER_BLOCKED = re.compile(r"5\.7\.\d|blocked|blacklist|blocklist|spamhaus|denied|not allowed|policy|reputation|"
+                            r"reverse dns|ptr record|banned|refused", re.I)
+MAILBOX_GONE_CODE = re.compile(r"\b5\.(1\.1|1\.10|4\.1)\b")  # enhanced status codes that mean "no such mailbox"
+PROBE_PORT, PROBE_PAUSE, GREYLIST_WAIT = 25, 0.6, 4.0
+_probe_locks: dict[str, asyncio.Lock] = {}
+
+
+def mail_provider(mx: list[str]) -> str:
+    """Who hosts the domain's mail, read off its MX records."""
+    host = (mx or [""])[0].lower()
+    return next((name for name, ends in MAIL_PROVIDERS if host.endswith(ends)), "other")
+
+
+def looks_gibberish(local: str) -> bool:
+    """Random-looking local parts (generated or throwaway addresses)."""
+    if len(local) < 8:
+        return False
+    letters = re.sub(r"[^a-z]", "", local)
+    if sum(ch.isdigit() for ch in local) / len(local) > 0.5:
+        return True
+    if len(letters) >= 8 and not re.search(r"[aeiouy]", letters):
+        return True
+    return bool(re.search(r"[bcdfghjklmnpqrstvwxz]{6,}", letters))
+
+
+def _helo() -> str:
+    """Name we introduce ourselves with. Mail servers trust it more when it matches the IP's reverse DNS."""
+    if config.env("SMTP_HELO"):
+        return config.env("SMTP_HELO")
+    return web.host_of(config.SMTP_FROM.split("@")[-1]) if config.SMTP_FROM else "localhost.localdomain"
+
+
 def _smtp_probe(mx: str, address: str, helo_domain: str) -> tuple[str, str]:
-    """RCPT TO probe without sending mail. Returns (accept|reject|unknown, detail)."""
+    """Ask the mail server whether it would accept mail for `address`, then hang up without sending.
+
+    Returns (accept | reject | blocked | greylisted | unknown, detail). `blocked` means the server refused
+    *us*, which says nothing about the mailbox.
+    """
+    mail_from = config.SMTP_FROM or f"verify@{helo_domain}"
     try:
-        with smtplib.SMTP(mx, 25, timeout=8, local_hostname=helo_domain) as s:
+        with smtplib.SMTP(mx, PROBE_PORT, timeout=10, local_hostname=helo_domain) as s:
             s.ehlo()
-            s.mail(f"verify@{helo_domain}")
-            code, msg = s.rcpt(address)
+            if s.has_extn("starttls"):
+                try:
+                    s.starttls()
+                    s.ehlo()
+                except (smtplib.SMTPException, OSError):
+                    pass
+            code, msg = s.mail(mail_from)
+            if code >= 400:
+                return "blocked", f"{code} at MAIL FROM"
+            code, raw = s.rcpt(address)
+            msg = raw.decode("utf-8", "replace")[:160] if isinstance(raw, bytes) else str(raw)[:160]
             if code in (250, 251):
                 return "accept", str(code)
-            if code in (550, 551, 553):
-                return "reject", f"{code} {msg[:80]!r}"
-            return "unknown", f"{code}"
+            if 400 <= code < 500:
+                return "greylisted", f"{code} {msg}"
+            if code >= 500:
+                if MAILBOX_GONE_CODE.search(msg):
+                    return "reject", f"{code} {msg}"
+                if SENDER_BLOCKED.search(msg):
+                    return "blocked", f"{code} {msg}"
+                if USER_UNKNOWN.search(msg):
+                    return "reject", f"{code} {msg}"
+                # A bare 5xx with wording we do not recognise is not proof the mailbox is missing.
+                return "unknown", f"{code} {msg}"
+            return "unknown", str(code)
     except (socket.timeout, OSError, smtplib.SMTPException) as e:
         return "unknown", type(e).__name__
+
+
+async def _probe(mx: str, address: str) -> tuple[str, str]:
+    domain = address.rsplit("@", 1)[-1]
+    lock = _probe_locks.setdefault(domain, asyncio.Lock())
+    async with lock:  # one conversation per domain at a time, with a pause between them
+        res = await asyncio.to_thread(_smtp_probe, mx, address, _helo())
+        await asyncio.sleep(PROBE_PAUSE)
+    return res
+
+
+async def domain_is_catch_all(domain: str, mx: list[str]) -> bool | None:
+    """True when the server accepts mail for an address that cannot exist. None when it would not tell us."""
+    cached = db.cache_get(f"catchall:{domain}", 14 * 86400)
+    if cached is not None:
+        return cached
+    res, _ = await _probe(mx[0], f"zz-no-such-mailbox-{abs(hash(domain)) % 99991}@{domain}")
+    answer = True if res == "accept" else False if res == "reject" else None
+    if answer is not None:
+        db.cache_set(f"catchall:{domain}", answer)
+    return answer
+
+
+async def smtp_verify(email: str, mx: list[str]) -> tuple[str, str]:
+    """Mailbox-level check. Returns (valid | invalid | catch_all | unknown, detail)."""
+    domain = email.rsplit("@", 1)[-1]
+    catch_all = await domain_is_catch_all(domain, mx)
+    if catch_all is True:
+        return "catch_all", "domain accepts every address"
+    if catch_all is None:
+        return "unknown", "mail server would not answer a verification probe"
+    res, detail = await _probe(mx[0], email)
+    if res == "greylisted":  # temporary deferral: one polite retry
+        await asyncio.sleep(GREYLIST_WAIT)
+        res, detail = await _probe(mx[0], email)
+    return {"accept": "valid", "reject": "invalid"}.get(res, "unknown"), detail
 
 
 async def validate_email(raw: str, deep: bool = True) -> dict:
@@ -148,20 +246,26 @@ async def validate_email(raw: str, deep: bool = True) -> dict:
         except Exception:
             flags.append("hunter:error")
     elif deep and config.SMTP_PROBE and "free_mail" not in flags:
-        helo = web.host_of(config.SMTP_FROM.split("@")[-1]) if config.SMTP_FROM else "localhost.localdomain"
-        res, detail = await asyncio.to_thread(_smtp_probe, mx[0], email, helo)
-        if res == "reject":
-            status, score, reason = "invalid", 0, f"mailbox rejected ({detail})"
-        elif res == "accept":
-            bogus = f"zz-no-such-user-{abs(hash(domain)) % 99999}@{domain}"
-            res2, _ = await asyncio.to_thread(_smtp_probe, mx[0], bogus, helo)
-            if res2 == "accept":
-                flags.append("catch_all")
-                status, score, reason = "risky", 60, "catch-all domain accepts every address"
-            else:
-                status, score, reason = "valid", 95, "mailbox accepted by mail server"
+        res, detail = await smtp_verify(email, mx)
+        if res == "invalid":
+            status, score, reason = "invalid", 0, f"mailbox rejected by its mail server ({detail[:60]})"
+        elif res == "valid":
+            flags.append("smtp_verified")
+            status, score, reason = "valid", 95, "mailbox accepted by its mail server"
+        elif res == "catch_all":
+            flags.append("catch_all")
+            status, score, reason = "risky", 60, "catch-all domain accepts every address, so the mailbox cannot be confirmed"
         else:
             flags.append("probe_unavailable")
+            reason = "domain accepts mail; " + detail
+    provider = mail_provider(mx)
+    if provider != "other":
+        flags.append(f"mx:{provider}")
+    if looks_gibberish(local):
+        flags.append("gibberish")
+        if status != "invalid":
+            score -= 25
+            reason += "; address looks randomly generated"
     if status != "invalid":
         if "role" in flags:
             score -= 15
@@ -172,18 +276,94 @@ async def validate_email(raw: str, deep: bool = True) -> dict:
     return out
 
 
-def email_candidates(name: str, domain: str) -> list[str]:
-    """Common corporate address patterns, most frequent first."""
+PATTERNS = ["first.last", "first", "flast", "firstlast", "firstl", "first_last", "last"]
+
+
+def _name_parts(name: str) -> tuple[str, str]:
     parts = [re.sub(r"[^a-z]", "", p) for p in re.split(r"[\s\-]+", (name or "").lower())]
     parts = [p for p in parts if p]
-    if not parts or not domain:
+    if not parts:
+        return "", ""
+    return parts[0], (parts[-1] if len(parts) > 1 else "")
+
+
+def email_candidates(name: str, domain: str) -> list[str]:
+    """Common corporate address patterns in PATTERNS order, most frequent first."""
+    f, last = _name_parts(name)
+    if not f or not domain:
         return []
-    f, last = parts[0], parts[-1] if len(parts) > 1 else ""
-    pats = [f"{f}@{domain}"]
-    if last:
-        pats = [f"{f}.{last}@{domain}", f"{f}@{domain}", f"{f[0]}{last}@{domain}", f"{f}{last}@{domain}",
-                f"{f}{last[0]}@{domain}", f"{f}_{last}@{domain}", f"{last}@{domain}"]
-    return pats
+    if not last:
+        return [f"{f}@{domain}"]
+    return [f"{f}.{last}@{domain}", f"{f}@{domain}", f"{f[0]}{last}@{domain}", f"{f}{last}@{domain}",
+            f"{f}{last[0]}@{domain}", f"{f}_{last}@{domain}", f"{last}@{domain}"]
+
+
+def pattern_of(email: str, name: str) -> str | None:
+    """Which naming pattern produces this address for this person, if any."""
+    email = normalize_email(email)
+    cands = email_candidates(name, email.rsplit("@", 1)[-1]) if "@" in email else []
+    return PATTERNS[cands.index(email)] if len(cands) == len(PATTERNS) and email in cands else None
+
+
+def learn_pattern(domain: str, email: str, name: str) -> str | None:
+    """Remember a company's address pattern from one real address, so the rest of the team can be derived."""
+    p = pattern_of(email, name)
+    if p and p != "first":  # a bare first name is too often a one-off for founders
+        db.cache_set(f"pattern:{domain}", p)
+    return p
+
+
+def known_pattern(domain: str) -> str | None:
+    return db.cache_get(f"pattern:{domain}", 180 * 86400)
+
+
+def ordered_candidates(name: str, domain: str) -> list[str]:
+    cands = email_candidates(name, domain)
+    p = known_pattern(domain)
+    if p and len(cands) == len(PATTERNS):
+        i = PATTERNS.index(p)
+        cands = [cands[i]] + cands[:i] + cands[i + 1:]
+    return cands
+
+
+async def find_email(name: str, domain: str) -> dict:
+    """Best address for a named person at a domain, with an honest account of how sure we are.
+
+    With mailbox probing available it tries each pattern until the mail server accepts one. Otherwise it
+    returns the company's known pattern (learned from a real address) or the most common pattern.
+    """
+    cands = ordered_candidates(name, domain)
+    if not cands:
+        return {"email": "", "status": None, "score": 0, "flags": [], "reason": "no name to build an address from"}
+    pattern = known_pattern(domain)
+    if config.SMTP_PROBE and domain not in FREE_DOMAINS and not config.HUNTER_API_KEY:
+        mx = await mx_hosts(domain)
+        if mx and await domain_is_catch_all(domain, mx) is False:
+            for cand in cands[:5]:
+                res, _ = await smtp_verify(cand, mx)
+                if res == "valid":
+                    learn_pattern(domain, cand, name)
+                    out = await validate_email(cand, deep=False)
+                    out.update(status="valid", score=95, reason="mailbox accepted by its mail server",
+                               flags=out["flags"] + ["smtp_verified"])
+                    return out
+                if res != "invalid":
+                    break  # server stopped answering; do not keep knocking
+            else:
+                return {"email": "", "status": None, "score": 0, "flags": ["no_pattern_matched"],
+                        "reason": "none of the common address patterns is a real mailbox"}
+    out = await validate_email(cands[0], deep=True)
+    if out["status"] in ("invalid", "valid"):
+        return out
+    if pattern:
+        out["flags"].append("pattern_confirmed")
+        out.update(status="risky", score=min(out["score"], 70),
+                   reason=f"follows this company's confirmed {pattern} pattern; " + out["reason"])
+    else:
+        out["flags"].append("pattern_guess")
+        out.update(status="risky", score=min(out["score"], 45),
+                   reason="guessed from the most common pattern; " + out["reason"])
+    return out
 
 
 # ---------- phones ----------

@@ -1,0 +1,8 @@
+{
+  "name": "signalpipe-linkedin-agent",
+  "private": true,
+  "type": "module",
+  "description": "Drives your own Chrome to carry out Signalpipe LinkedIn steps.",
+  "scripts": { "start": "node linkedin-agent.mjs run", "login": "node linkedin-agent.mjs login" },
+  "dependencies": { "playwright-core": "1.63.0" }
+}

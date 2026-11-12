@@ -33,8 +33,9 @@ const sigPill = (t) => { const [l, c] = SIG[t] || [t || 'Signal', '']; return `<
 const scoreBox = (raw) => { const n = Math.round(raw); const c = n >= 65 ? 'hi' : n >= 45 ? 'mid' : 'lo'; const w = n >= 65 ? 'Strong' : n >= 45 ? 'Fair' : 'Weak'; return `<div class="score ${c}"><b>${n}</b><span>${w}</span></div>`; };
 const emailPill = (st, detail) => {
   if (!st) return '';
-  const guess = (detail?.flags || []).includes('pattern_guess');
-  const m = { valid: ['Valid', 'mint'], risky: [guess ? 'Risky, pattern guess' : 'Risky', 'butter'], invalid: ['Invalid', 'blush'], unknown: ['Unchecked', ''] }[st] || [st, ''];
+  const f = detail?.flags || [];
+  const risky = f.includes('pattern_confirmed') ? 'Likely, pattern confirmed' : f.includes('pattern_guess') ? 'Risky, pattern guess' : f.includes('catch_all') ? 'Risky, accepts all mail' : 'Risky';
+  const m = { valid: [f.includes('smtp_verified') ? 'Valid, mailbox confirmed' : 'Valid', 'mint'], risky: [risky, 'butter'], invalid: ['Invalid', 'blush'], unknown: ['Unchecked', ''] }[st] || [st, ''];
   return `<span class="pill ${m[1]}" title="${esc(detail?.reason || '')}">${esc(m[0])}</span>`;
 };
 const phonePill = (d) => {
@@ -48,7 +49,7 @@ const phonePill = (d) => {
 const empty = (title, body, action = '') => `<div class="empty col" style="align-items:center"><h3>${esc(title)}</h3><p>${esc(body)}</p>${action}</div>`;
 
 /* ---------- frame ---------- */
-const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
+const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['insights', 'Insights'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
 function frame(inner) {
   const st = S.status || { leads: {}, config: {}, linkedin: {} };
   const counts = { leads: st.leads?.new || '', inbox: st.unhandled_replies || '' };
@@ -62,7 +63,7 @@ function frame(inner) {
       <div class="row between"><span>Emails sent</span><span class="mono">${st.emails_today ?? 0} / ${st.config?.email_daily_cap ?? 0}</span></div>
       <div class="row between"><span>LinkedIn steps</span><span class="mono">${st.linkedin_today ?? 0} / ${st.config?.linkedin_daily_cap ?? 0}</span></div>
       <div class="row between"><span>Calls logged</span><span class="mono">${st.calls_today ?? 0}</span></div>
-      <div class="row" style="gap:8px"><span class="dot ${li ? '' : 'off'}" aria-hidden="true"></span>${li ? 'LinkedIn connected' : 'LinkedIn by hand'}</div>
+      <div class="row" style="gap:8px"><span class="dot ${li ? (st.linkedin.agent?.blocked ? 'bad' : '') : 'off'}" aria-hidden="true"></span>${li ? (st.linkedin.agent?.blocked ? 'LinkedIn needs you' : st.linkedin.via === 'agent' && !st.linkedin.agent.online ? 'LinkedIn agent offline' : 'LinkedIn connected') : 'LinkedIn by hand'}</div>
     </div>
   </nav>
   <main class="main" id="view">${inner}</main></div>`;
@@ -137,7 +138,7 @@ async function loadLead(id) {
       ${c.email ? `<div class="row" style="gap:8px"><span class="mono">${esc(c.email)}</span>${emailPill(c.email_status, c.email_detail)}</div>` : ''}
       ${c.phone ? `<div class="row" style="gap:8px"><a class="mono" href="${href('tel:' + c.phone)}">${esc(c.phone_detail?.display || c.phone)}</a>${phonePill(c.phone_detail)}</div>` : ''}
       <div class="row" style="gap:8px">${c.linkedin_url ? `<a class="small" href="${href(c.linkedin_url)}" target="_blank" rel="noopener noreferrer">${c.linkedin_url.includes('/search/') ? 'Find on LinkedIn' : 'LinkedIn profile'}</a>` : ''}${c.is_primary ? '' : `<button class="btn sm" data-act="primary" data-id="${c.id}">Make primary</button>`}</div></div>`).join('') || `<p class="small soft">No contacts yet. <a href="${href(l.linkedin_search_url)}" target="_blank" rel="noopener noreferrer">Search LinkedIn for the buyer</a>.</p>`}</div>
-    ${l.messages.length ? `<div class="col" style="gap:6px"><div class="eyebrow">Sequence</div>${l.messages.map((m) => `<div class="row small" style="gap:8px"><span class="pill ${m.status === 'sent' || m.status === 'done' ? 'mint' : m.status === 'queued' ? 'peri' : m.status === 'failed' ? 'blush' : 'draft'}">${esc(m.channel)} ${m.step} · ${esc(m.status)}</span><span class="soft">${esc(m.subject || '')}</span></div>`).join('')}<a class="small" href="#/outreach">Open in Outreach</a></div>` : ''}
+    ${l.messages.length ? `<div class="col" style="gap:6px"><div class="row between"><div class="eyebrow">Sequence</div>${l.variant ? `<span class="pill lilac" title="Opening angle being tested on this lead">Test: ${esc({ signal: 'signal first', pain: 'pain first', question: 'question first', proof: 'proof first' }[l.variant] || l.variant)}</span>` : ''}</div>${l.messages.map((m) => `<div class="row small" style="gap:8px"><span class="pill ${m.status === 'sent' || m.status === 'done' ? 'mint' : m.status === 'queued' ? 'peri' : m.status === 'failed' ? 'blush' : 'draft'}">${esc(m.channel)} ${m.step} · ${esc(m.status)}</span><span class="soft">${esc(m.subject || '')}</span></div>`).join('')}<a class="small" href="#/outreach">Open in Outreach</a></div>` : ''}
     <div class="row" style="gap:8px">${isNew ? `<button class="btn primary grow" data-act="approve" data-id="${l.id}">Approve and draft sequence</button><button class="btn" data-act="reject" data-id="${l.id}">Reject</button>` : `<select class="i" style="width:auto" data-change="leadStatus" aria-label="Lead status">${['new', 'approved', 'contacted', 'replied', 'won', 'lost', 'rejected'].map((s) => `<option ${s === l.status ? 'selected' : ''}>${s}</option>`).join('')}</select><button class="btn" data-act="redraft" data-id="${l.id}">Rewrite sequence</button>`}
     <button class="btn" data-act="enrich" data-id="${l.id}">Look up again</button></div></div>`;
 }
@@ -167,7 +168,7 @@ async function viewOutreach() {
     return `<article class="card col"><div class="row between"><b style="font-weight:600">${who(m)}</b>${stPill(m)}</div><div class="row" style="gap:8px">${top}</div>${editor(m, m.channel === 'email')}
       ${S.outDone ? '' : `<div class="row" style="gap:8px">${actions}<button class="btn sm" data-act="msg" data-do="skip" data-id="${m.id}">Skip</button></div>`}</article>`;
   }).join('');
-  const hint = { email: st.config.smtp ? '' : 'No mailbox is connected, so approved emails will wait. Add SMTP settings to send.', linkedin: liOn ? 'Approved steps are sent for you during working hours, a few at a time.' : 'No LinkedIn account is connected. Open the profile, paste the note, then mark it done.', call: 'Sorted so numbers in business hours come first. US mobiles must be dialed by hand.' }[S.outTab];
+  const hint = { email: st.config.smtp ? '' : 'No mailbox is connected, so approved emails will wait. Add SMTP settings to send.', linkedin: liOn ? (st.linkedin.via === 'agent' ? (st.linkedin.agent.online ? 'Approved steps are sent by the agent on your computer, a few at a time during working hours.' : 'Approved steps will go out the next time the agent on your computer is running.') : 'Approved steps are sent for you during working hours, a few at a time.') : 'No LinkedIn account is connected. Open the profile, paste the note, then mark it done.', call: 'Sorted so numbers in business hours come first. US mobiles must be dialed by hand.' }[S.outTab];
   frame(`${head(cap, 'Outreach', `<div class="tabs" role="group" aria-label="Sending mode"><button class="tab" aria-pressed="${st.send_mode !== 'auto'}" data-act="mode" data-id="copilot">Review each step</button><button class="tab" aria-pressed="${st.send_mode === 'auto'}" data-act="mode" data-id="auto">Send automatically</button></div>`)}
   <div class="row between"><div class="tabs">${[['email', 'Email'], ['linkedin', 'LinkedIn'], ['call', 'Calls']].map(([k, l]) => `<button class="tab" aria-pressed="${S.outTab === k}" data-act="outTab" data-id="${k}">${l}</button>`).join('')}</div>
   <div class="tabs"><button class="tab" aria-pressed="${!S.outDone}" data-act="outDone" data-id="0">To do</button><button class="tab" aria-pressed="${S.outDone}" data-act="outDone" data-id="1">Done</button></div></div>
@@ -185,6 +186,22 @@ async function viewInbox() {
     <div class="small soft">${esc(r.subject || '')}</div><div class="well">${esc(r.body || '')}</div>
     ${r.kind.startsWith('reply') || r.kind === 'reply' ? `<label class="f">Your answer<textarea class="i" rows="5" data-reply="${r.id}">${esc(r.draft_reply || '')}</textarea></label>` : ''}
     <div class="row" style="gap:8px">${to && r.kind.startsWith('reply') ? `<button class="btn softp sm" data-act="mailto" data-id="${r.id}" data-to="${esc(to)}" data-subject="${esc(r.subject || '')}">Open in my mail app</button>` : ''}<button class="btn sm" data-act="copyReply" data-id="${r.id}">Copy</button><button class="btn sm" data-act="handled" data-id="${r.id}">Mark handled</button></div></article>`; }).join('') || empty('Inbox is clear', 'Replies, bounces and unsubscribe requests show up here, each with a drafted answer.')}</div>`);
+}
+
+/* ---------- insights ---------- */
+async function viewInsights() {
+  const [plays, r] = await Promise.all([api('/plays'), api('/insights' + (S.insightPlay ? `?play_id=${S.insightPlay}` : ''))]);
+  const f = r.funnel;
+  const pct = (v) => (v === null || v === undefined ? 'n/a' : v + '%');
+  const table = (title, note, rows) => `<section class="card lg col"><div><h2>${title}</h2><p class="small soft">${note}</p></div>
+    ${rows.length ? `<div class="scroll"><table class="t fixed"><thead><tr><th>${title.replace(/^By /, '')}</th><th>Contacted</th><th>Replied</th><th>Reply rate</th><th>Interested</th><th>Accepted on LinkedIn</th><th>Won</th></tr></thead><tbody>
+    ${rows.map((g) => `<tr><td style="font-weight:500">${esc(g.name)}</td><td class="mono">${g.contacted}</td><td class="mono">${g.replied}</td><td>${g.enough ? `<span class="pill ${g.reply_rate >= 15 ? 'mint' : g.reply_rate >= 5 ? 'butter' : 'blush'}">${g.reply_rate}%</span>` : `<span class="pill draft" title="Fewer than ${r.min_judge} contacted">${g.reply_rate}%, too few to judge</span>`}</td><td class="mono">${g.positive}</td><td class="mono">${g.invited ? `${g.accepted} of ${g.invited}` : 'none sent'}</td><td class="mono">${g.won}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small soft">Nothing contacted yet.</p>'}</section>`;
+  frame(`${head('What is working', 'Insights', `<select class="i" style="width:auto" data-change="insightPlay" aria-label="Play"><option value="0">All plays</option>${plays.map((p) => `<option value="${p.id}" ${S.insightPlay == p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`)}
+  <div class="stats">${[['Found', f.found, 'All leads'], ['Approved', pct(f.approval_rate), `${f.approved} of ${f.reviewed} reviewed`], ['Contacted', f.contacted, 'At least one step sent'], ['Replied', pct(f.reply_rate), `${f.replied} replies`], ['Interested', f.positive, 'Positive replies'], ['Won', f.won, 'Meetings booked']].map(([l, v, n]) => `<div class="card stat"><div class="small soft">${l}</div><div class="v">${v}</div><div class="small soft">${esc(n)}</div></div>`).join('')}</div>
+  ${r.findings.length ? `<section class="note col" style="gap:6px"><b style="font-weight:600">What the numbers say</b><ul class="clean" style="gap:4px">${r.findings.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></section>` : `<p class="small soft">${r.enough_data ? 'No clear differences between groups yet.' : `Conclusions appear once about ${r.min_judge * 2} leads have been contacted; until then treat the rates below as noise.`}</p>`}
+  ${table('By opening', 'Each approved lead is given one of four opening angles. Angles that earn replies are used more often automatically; the others keep getting a small share so they can prove themselves.', r.tables.angle)}
+  <div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(min(560px,100%),1fr))">${table('By signal', 'Which kind of trigger produces buyers.', r.tables.signal)}${table('By buyer level', 'Who actually answers.', r.tables.title)}
+  ${table('By score', 'If high scores do not reply more, the scoring needs your reject notes.', r.tables.score)}${table('By channel', 'Which mix of channels each lead received.', r.tables.channel)}</div>`);
 }
 
 /* ---------- seo ---------- */
@@ -254,15 +271,20 @@ async function viewSettings() {
     ${rowS(c.llm, 'Claude', `Scoring and writing with ${c.llm_model}`, 'Keyword scoring and template messages only', 'ANTHROPIC_API_KEY')}
     ${rowS(c.smtp, 'Outgoing mail', `Up to ${c.email_daily_cap} a day from your mailbox`, 'Approved emails will wait', 'SMTP_HOST SMTP_USER SMTP_PASS SMTP_FROM')}
     ${rowS(c.imap, 'Reply detection', 'Replies stop sequences automatically', 'Replies will not be detected', 'IMAP_HOST IMAP_USER IMAP_PASS')}
-    ${rowS(c.hunter, 'Email finder and verifier', 'Hunter finds named contacts and verifies mailboxes', 'Addresses are pattern guesses checked against DNS only', 'HUNTER_API_KEY')}
+    ${rowS(c.smtp_probe, 'Mailbox verification', 'Each address is confirmed with its own mail server', 'Needs outbound port 25, which most clouds block until you ask', 'SMTP_PROBE=1')}
+    ${rowS(c.hunter, 'Hunter', 'Finds named contacts and verifies mailboxes for you', 'Optional paid alternative to the built-in verification', 'HUNTER_API_KEY')}
     ${rowS(c.twilio_lookup, 'Carrier phone lookup', 'Twilio confirms line type per number', 'Line type comes from the number plan only', 'TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN')}
     ${rowS(c.postal_address, 'Postal address in footer', 'Included in every email', 'Required by US law for commercial email', 'POSTAL_ADDRESS')}
     ${rowS(c.auth, 'Password', 'Sign-in required', 'Anyone who can reach this address can use it', 'APP_PASSWORD')}</ul>
     ${c.smtp ? '<div class="row"><button class="btn sm" data-act="testEmail">Send myself a test email</button></div>' : ''}</section>
   <section class="card lg col"><h2>LinkedIn</h2>
-    <p class="small soft">${li.enabled ? `Connected${li.account ? ' as ' + esc(li.account) : ''}. ${li.sent_this_week} of ${li.weekly_cap} invites used this week.` : li.provider_ready ? 'Provider keys are set. Sign in to LinkedIn on the provider page, then come back and press Check connection.' : 'To send and read LinkedIn automatically, add a Unipile account (UNIPILE_DSN and UNIPILE_API_KEY), then connect here. Without it, LinkedIn steps wait in a queue for you to send by hand.'}</p>
-    <p class="small soft">Automated LinkedIn activity is against LinkedIn's terms for third-party tools. The caps here are set low on purpose.</p>
-    <div class="row">${li.enabled ? '<button class="btn" data-act="liSync">Check for accepts and replies</button><button class="btn danger" data-act="liDisconnect">Stop using this account</button>' : li.provider_ready ? '<button class="btn primary" data-act="liConnect">Connect LinkedIn</button><button class="btn" data-act="liRefresh">Check connection</button>' : ''}</div></section>
+    ${li.via === 'agent' ? `<p class="small"><span class="pill ${li.agent.blocked ? 'blush' : li.agent.online ? 'mint' : 'butter'}">${li.agent.blocked ? 'Needs you' : li.agent.online ? 'Agent running' : 'Agent offline'}</span> ${li.agent.blocked ? esc(li.agent.blocked) + '. Start the agent again and sign in in its window.' : `Your own Chrome is doing the LinkedIn steps. Last check-in ${ago(li.agent.last_seen)}. ${li.sent_this_week} of ${li.weekly_cap} invites used this week.`}</p>`
+    : li.via === 'provider' ? `<p class="small"><span class="pill mint">Connected</span> ${li.account ? 'Signed in as ' + esc(li.account) + '. ' : ''}${li.sent_this_week} of ${li.weekly_cap} invites used this week.</p>`
+    : `<p class="small soft">Not connected, so LinkedIn steps wait in a queue for you to send by hand. Two ways to make it hands-off:</p>
+       <ul class="small soft" style="margin:0;padding-left:18px"><li><b style="font-weight:600;color:var(--text)">Agent on your computer (free).</b> Run <span class="mono">node linkedin-agent.mjs run</span> from the <span class="mono">agent</span> folder, sign in once in the Chrome window it opens, and it works while your computer is on.</li>
+       <li><b style="font-weight:600;color:var(--text)">Unipile (paid, always on).</b> Set <span class="mono">UNIPILE_DSN</span> and <span class="mono">UNIPILE_API_KEY</span>, then connect here.</li></ul>`}
+    <p class="small soft">Automated LinkedIn activity is against LinkedIn's terms. The caps are set low on purpose, and the agent stops if LinkedIn asks for a security check.</p>
+    <div class="row">${li.via === 'provider' ? '<button class="btn" data-act="liSync">Check for accepts and replies</button><button class="btn danger" data-act="liDisconnect">Stop using this account</button>' : li.provider_ready && !li.enabled ? '<button class="btn primary" data-act="liConnect">Connect LinkedIn</button><button class="btn" data-act="liRefresh">Check connection</button>' : ''}</div></section>
   <section class="card lg col"><h2>Check an address or number</h2><form class="row" data-form="check"><input class="i grow" name="value" placeholder="name@company.com or +1 415 555 0132" aria-label="Email or phone"><button class="btn">Check</button></form><div id="checkOut"></div></section>
   <section class="card lg col"><h2>Do not contact</h2><form class="row" data-form="suppress"><input class="i grow" name="value" placeholder="address or whole domain" aria-label="Address or domain"><button class="btn">Add</button></form>
     ${sup.length ? `<ul class="clean small">${sup.map((s) => `<li class="row between"><span><span class="mono">${esc(s.value)}</span> <span class="soft">${esc(s.reason || '')}</span></span><button class="btn sm" data-act="unsuppress" data-id="${esc(s.value)}">Remove</button></li>`).join('')}</ul>` : '<p class="small soft">Empty. Unsubscribe replies are added here automatically.</p>'}</section>
@@ -270,7 +292,7 @@ async function viewSettings() {
 }
 
 /* ---------- router ---------- */
-const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
+const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, insights: viewInsights, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
 const render = guard(async () => {
   const name = (location.hash.replace(/^#\//, '').split('?')[0]) || 'today';
   S.view = VIEWS[name] ? name : 'today';
@@ -300,7 +322,7 @@ const A = {
   },
   outTab: (id) => { S.outTab = id; return render(); },
   outDone: (id) => { S.outDone = id === '1'; return render(); },
-  mode: async (id) => { await api('/settings', { method: 'PUT', body: { send_mode: id } }); toast(id === 'auto' ? 'First emails to verified addresses now send without review.' : 'Every step waits for your review.'); return render(); },
+  mode: async (id) => { await api('/settings', { method: 'PUT', body: { send_mode: id } }); toast(id === 'auto' ? 'First emails to verified addresses and LinkedIn invites to known profiles now send without review.' : 'Every step waits for your review.'); return render(); },
   msg: async (id, btn) => { await api('/messages/' + id, { method: 'PUT', body: { ...(await saveField(id)), action: btn.dataset.do } }); return render(); },
   outcome: async (id, btn) => { await api('/messages/' + id, { method: 'PUT', body: { ...(await saveField(id)), action: 'done', outcome: btn.dataset.do } }); return render(); },
   copy: async (id) => { const el = root.querySelector(`[data-field="body"][data-id="${id}"]`); await navigator.clipboard.writeText(el ? el.value : ''); toast('Copied.'); },
@@ -330,6 +352,7 @@ root.addEventListener('click', (e) => {
 root.addEventListener('change', guard(async (e) => {
   const el = e.target.closest('[data-change]');
   if (!el) return;
+  if (el.dataset.change === 'insightPlay') { S.insightPlay = +el.value; return render(); }
   if (el.dataset.change === 'leadStatus') { await api(`/leads/${S.leadId}/status`, { method: 'POST', body: { status: el.value } }); return render(); }
   if (el.dataset.change === 'outcome' && el.value) { await api('/messages/' + el.dataset.id, { method: 'PUT', body: { ...(await saveField(el.dataset.id)), action: 'done', outcome: el.value } }); return render(); }
   if (el.dataset.change === 'csv' && el.files[0]) { const r = await api(`/plays/${el.dataset.id}/import`, { method: 'POST', raw: await el.files[0].text() }); toast(`Imported ${r.rows} rows, ${r.new_leads} new leads.`); return render(); }

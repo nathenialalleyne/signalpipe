@@ -52,8 +52,14 @@ def provider_ready() -> bool:
     return bool(DSN and API_KEY)
 
 
-def enabled() -> bool:
+def unipile_enabled() -> bool:
     return bool(provider_ready() and account_id())
+
+
+def enabled() -> bool:
+    """LinkedIn steps can be sent for you: through the provider, or through the agent on your own computer."""
+    from . import li_agent
+    return unipile_enabled() or li_agent.active()
 
 
 async def connect_url(return_to: str) -> str:
@@ -92,7 +98,9 @@ def disconnect() -> None:
 
 
 def state() -> dict:
-    return {"enabled": enabled(), "provider_ready": provider_ready(),
+    from . import li_agent
+    return {"enabled": enabled(), "provider_ready": provider_ready(), "agent": li_agent.status(),
+            "via": "provider" if unipile_enabled() else "agent" if li_agent.active() else "",
             "account": db.get_setting("linkedin_account_name", "") if account_id() else "", "error": db.get_setting("linkedin_error", ""),
             "paused_until": db.get_setting("linkedin_pause_until", 0), "weekly_cap": WEEKLY_CAP, "note_max": NOTE_MAX,
             "sent_this_week": _invites_since(7 * 86400)}
@@ -170,7 +178,7 @@ def _ts(post: dict) -> float:
 
 async def collect(cfg: dict) -> list[Signal]:
     """Engagers on watched pages and authors of keyword posts. Read-only, bounded by READ_BUDGET."""
-    if not enabled():
+    if not unipile_enabled():
         return []
     since, budget, out = cutoff(cfg), READ_BUDGET, []
     try:
@@ -247,7 +255,12 @@ def _working_hours(now: dt.datetime | None = None) -> bool:
         local = (now or dt.datetime.now(dt.timezone.utc)).astimezone(zoneinfo.ZoneInfo(TZ))
     except Exception:
         local = now or dt.datetime.now()
-    return local.weekday() < 5 and 9 <= local.hour < 18
+    try:
+        start, end = (int(x) for x in config.env("LINKEDIN_HOURS", "9-18").split("-"))
+    except ValueError:
+        start, end = 9, 18
+    weekday_ok = local.weekday() < 5 or config.env("LINKEDIN_WEEKENDS", "0") == "1"
+    return weekday_ok and start <= local.hour < end
 
 
 async def _provider_id(contact: dict) -> str:
@@ -274,7 +287,7 @@ async def _provider_id(contact: dict) -> str:
 
 async def send_next() -> dict:
     """Send at most one queued LinkedIn step. Called every few minutes; pacing comes from the skips."""
-    if not enabled():
+    if not unipile_enabled():
         return {"sent": 0, "reason": "provider not configured"}
     if db.get_setting("linkedin_pause_until", 0) > time.time():
         return {"sent": 0, "reason": "paused after hitting a LinkedIn limit"}
@@ -330,14 +343,18 @@ async def send_next() -> dict:
 def _release_followup(lead_id: int) -> None:
     """Once connected, the follow-up becomes sendable: queued in auto mode, otherwise left for your review."""
     auto = db.get_setting("send_mode", "copilot") == "auto"
+    try:
+        lo, hi = (float(x) for x in config.env("LINKEDIN_FOLLOWUP_DELAY_HOURS", "1-6").split("-"))
+    except ValueError:
+        lo, hi = 1.0, 6.0
     db.x("UPDATE messages SET status=?, scheduled_at=?, error=NULL WHERE lead_id=? AND channel='linkedin' AND step=2 "
          "AND status IN ('draft','queued')",
-         ("queued" if auto else "draft", db.now() + random.uniform(1, 6) * 3600, lead_id))
+         ("queued" if auto else "draft", db.now() + random.uniform(lo, hi) * 3600, lead_id))
 
 
 async def sync() -> dict:
     """Notice accepted invitations and inbound messages. Called about hourly."""
-    if not enabled():
+    if not unipile_enabled():
         return {}
     accepted = replies = 0
     try:
