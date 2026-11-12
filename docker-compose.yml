@@ -1,0 +1,21 @@
+# Signalpipe plus Caddy for automatic HTTPS. Set DOMAIN in .env to a name pointing at this machine.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      COOKIE_SECURE: "1"
+    volumes:
+      - data:/data
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    command: caddy reverse-proxy --from ${DOMAIN:?set DOMAIN in .env} --to app:8000
+    volumes:
+      - caddy:/data
+    depends_on: [app]
+volumes:
+  data:
+  caddy:

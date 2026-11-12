@@ -1,0 +1,8 @@
+fastapi==0.162.5
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+anthropic==2.8.0
+beautifulsoup4==4.15.0
+dnspython==2.9.2
+phonenumbers==9.0.43
+mcp==2.3.0
