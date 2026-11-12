@@ -49,7 +49,7 @@ const phonePill = (d) => {
 const empty = (title, body, action = '') => `<div class="empty col" style="align-items:center"><h3>${esc(title)}</h3><p>${esc(body)}</p>${action}</div>`;
 
 /* ---------- frame ---------- */
-const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
+const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['insights', 'Insights'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
 function frame(inner) {
   const st = S.status || { leads: {}, config: {}, linkedin: {} };
   const counts = { leads: st.leads?.new || '', inbox: st.unhandled_replies || '' };
@@ -138,7 +138,7 @@ async function loadLead(id) {
       ${c.email ? `<div class="row" style="gap:8px"><span class="mono">${esc(c.email)}</span>${emailPill(c.email_status, c.email_detail)}</div>` : ''}
       ${c.phone ? `<div class="row" style="gap:8px"><a class="mono" href="${href('tel:' + c.phone)}">${esc(c.phone_detail?.display || c.phone)}</a>${phonePill(c.phone_detail)}</div>` : ''}
       <div class="row" style="gap:8px">${c.linkedin_url ? `<a class="small" href="${href(c.linkedin_url)}" target="_blank" rel="noopener noreferrer">${c.linkedin_url.includes('/search/') ? 'Find on LinkedIn' : 'LinkedIn profile'}</a>` : ''}${c.is_primary ? '' : `<button class="btn sm" data-act="primary" data-id="${c.id}">Make primary</button>`}</div></div>`).join('') || `<p class="small soft">No contacts yet. <a href="${href(l.linkedin_search_url)}" target="_blank" rel="noopener noreferrer">Search LinkedIn for the buyer</a>.</p>`}</div>
-    ${l.messages.length ? `<div class="col" style="gap:6px"><div class="eyebrow">Sequence</div>${l.messages.map((m) => `<div class="row small" style="gap:8px"><span class="pill ${m.status === 'sent' || m.status === 'done' ? 'mint' : m.status === 'queued' ? 'peri' : m.status === 'failed' ? 'blush' : 'draft'}">${esc(m.channel)} ${m.step} · ${esc(m.status)}</span><span class="soft">${esc(m.subject || '')}</span></div>`).join('')}<a class="small" href="#/outreach">Open in Outreach</a></div>` : ''}
+    ${l.messages.length ? `<div class="col" style="gap:6px"><div class="row between"><div class="eyebrow">Sequence</div>${l.variant ? `<span class="pill lilac" title="Opening angle being tested on this lead">Test: ${esc({ signal: 'signal first', pain: 'pain first', question: 'question first', proof: 'proof first' }[l.variant] || l.variant)}</span>` : ''}</div>${l.messages.map((m) => `<div class="row small" style="gap:8px"><span class="pill ${m.status === 'sent' || m.status === 'done' ? 'mint' : m.status === 'queued' ? 'peri' : m.status === 'failed' ? 'blush' : 'draft'}">${esc(m.channel)} ${m.step} · ${esc(m.status)}</span><span class="soft">${esc(m.subject || '')}</span></div>`).join('')}<a class="small" href="#/outreach">Open in Outreach</a></div>` : ''}
     <div class="row" style="gap:8px">${isNew ? `<button class="btn primary grow" data-act="approve" data-id="${l.id}">Approve and draft sequence</button><button class="btn" data-act="reject" data-id="${l.id}">Reject</button>` : `<select class="i" style="width:auto" data-change="leadStatus" aria-label="Lead status">${['new', 'approved', 'contacted', 'replied', 'won', 'lost', 'rejected'].map((s) => `<option ${s === l.status ? 'selected' : ''}>${s}</option>`).join('')}</select><button class="btn" data-act="redraft" data-id="${l.id}">Rewrite sequence</button>`}
     <button class="btn" data-act="enrich" data-id="${l.id}">Look up again</button></div></div>`;
 }
@@ -186,6 +186,22 @@ async function viewInbox() {
     <div class="small soft">${esc(r.subject || '')}</div><div class="well">${esc(r.body || '')}</div>
     ${r.kind.startsWith('reply') || r.kind === 'reply' ? `<label class="f">Your answer<textarea class="i" rows="5" data-reply="${r.id}">${esc(r.draft_reply || '')}</textarea></label>` : ''}
     <div class="row" style="gap:8px">${to && r.kind.startsWith('reply') ? `<button class="btn softp sm" data-act="mailto" data-id="${r.id}" data-to="${esc(to)}" data-subject="${esc(r.subject || '')}">Open in my mail app</button>` : ''}<button class="btn sm" data-act="copyReply" data-id="${r.id}">Copy</button><button class="btn sm" data-act="handled" data-id="${r.id}">Mark handled</button></div></article>`; }).join('') || empty('Inbox is clear', 'Replies, bounces and unsubscribe requests show up here, each with a drafted answer.')}</div>`);
+}
+
+/* ---------- insights ---------- */
+async function viewInsights() {
+  const [plays, r] = await Promise.all([api('/plays'), api('/insights' + (S.insightPlay ? `?play_id=${S.insightPlay}` : ''))]);
+  const f = r.funnel;
+  const pct = (v) => (v === null || v === undefined ? 'n/a' : v + '%');
+  const table = (title, note, rows) => `<section class="card lg col"><div><h2>${title}</h2><p class="small soft">${note}</p></div>
+    ${rows.length ? `<div class="scroll"><table class="t fixed"><thead><tr><th>${title.replace(/^By /, '')}</th><th>Contacted</th><th>Replied</th><th>Reply rate</th><th>Interested</th><th>Accepted on LinkedIn</th><th>Won</th></tr></thead><tbody>
+    ${rows.map((g) => `<tr><td style="font-weight:500">${esc(g.name)}</td><td class="mono">${g.contacted}</td><td class="mono">${g.replied}</td><td>${g.enough ? `<span class="pill ${g.reply_rate >= 15 ? 'mint' : g.reply_rate >= 5 ? 'butter' : 'blush'}">${g.reply_rate}%</span>` : `<span class="pill draft" title="Fewer than ${r.min_judge} contacted">${g.reply_rate}%, too few to judge</span>`}</td><td class="mono">${g.positive}</td><td class="mono">${g.invited ? `${g.accepted} of ${g.invited}` : 'none sent'}</td><td class="mono">${g.won}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small soft">Nothing contacted yet.</p>'}</section>`;
+  frame(`${head('What is working', 'Insights', `<select class="i" style="width:auto" data-change="insightPlay" aria-label="Play"><option value="0">All plays</option>${plays.map((p) => `<option value="${p.id}" ${S.insightPlay == p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`)}
+  <div class="stats">${[['Found', f.found, 'All leads'], ['Approved', pct(f.approval_rate), `${f.approved} of ${f.reviewed} reviewed`], ['Contacted', f.contacted, 'At least one step sent'], ['Replied', pct(f.reply_rate), `${f.replied} replies`], ['Interested', f.positive, 'Positive replies'], ['Won', f.won, 'Meetings booked']].map(([l, v, n]) => `<div class="card stat"><div class="small soft">${l}</div><div class="v">${v}</div><div class="small soft">${esc(n)}</div></div>`).join('')}</div>
+  ${r.findings.length ? `<section class="note col" style="gap:6px"><b style="font-weight:600">What the numbers say</b><ul class="clean" style="gap:4px">${r.findings.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></section>` : `<p class="small soft">${r.enough_data ? 'No clear differences between groups yet.' : `Conclusions appear once about ${r.min_judge * 2} leads have been contacted; until then treat the rates below as noise.`}</p>`}
+  ${table('By opening', 'Each approved lead is given one of four opening angles. Angles that earn replies are used more often automatically; the others keep getting a small share so they can prove themselves.', r.tables.angle)}
+  <div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(min(560px,100%),1fr))">${table('By signal', 'Which kind of trigger produces buyers.', r.tables.signal)}${table('By buyer level', 'Who actually answers.', r.tables.title)}
+  ${table('By score', 'If high scores do not reply more, the scoring needs your reject notes.', r.tables.score)}${table('By channel', 'Which mix of channels each lead received.', r.tables.channel)}</div>`);
 }
 
 /* ---------- seo ---------- */
@@ -276,7 +292,7 @@ async function viewSettings() {
 }
 
 /* ---------- router ---------- */
-const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
+const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, insights: viewInsights, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
 const render = guard(async () => {
   const name = (location.hash.replace(/^#\//, '').split('?')[0]) || 'today';
   S.view = VIEWS[name] ? name : 'today';
@@ -336,6 +352,7 @@ root.addEventListener('click', (e) => {
 root.addEventListener('change', guard(async (e) => {
   const el = e.target.closest('[data-change]');
   if (!el) return;
+  if (el.dataset.change === 'insightPlay') { S.insightPlay = +el.value; return render(); }
   if (el.dataset.change === 'leadStatus') { await api(`/leads/${S.leadId}/status`, { method: 'POST', body: { status: el.value } }); return render(); }
   if (el.dataset.change === 'outcome' && el.value) { await api('/messages/' + el.dataset.id, { method: 'PUT', body: { ...(await saveField(el.dataset.id)), action: 'done', outcome: el.value } }); return render(); }
   if (el.dataset.change === 'csv' && el.files[0]) { const r = await api(`/plays/${el.dataset.id}/import`, { method: 'POST', raw: await el.files[0].text() }); toast(`Imported ${r.rows} rows, ${r.new_leads} new leads.`); return render(); }

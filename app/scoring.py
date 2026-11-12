@@ -109,6 +109,18 @@ def _examples() -> str:
         for r in rows:
             note = f" (note: {r['note']})" if r.get("note") else ""
             out.append(f"- {label}: {r['company_name'] or '?'}: {(r['description'] or '')[:120]} | {r['sig'] or ''}{note}")
+    # What happened after contact outweighs what looked good in the queue.
+    sig = "(SELECT title FROM signals s WHERE s.lead_id=l.id ORDER BY occurred_at DESC LIMIT 1)"
+    good = db.q(f"SELECT l.company_name, l.description, {sig} AS sig FROM leads l WHERE l.status='won' OR l.id IN "
+                "(SELECT lead_id FROM replies WHERE kind IN ('reply:interested','reply:question','reply:referral')) "
+                "ORDER BY l.updated_at DESC LIMIT 6")
+    cold = db.q(f"SELECT l.company_name, l.description, {sig} AS sig FROM leads l WHERE l.status='lost' OR "
+                "(l.status='contacted' AND l.updated_at < ? AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.lead_id=l.id "
+                "AND m.outcome='accepted')) ORDER BY l.updated_at DESC LIMIT 6", (db.now() - 14 * 86400,))
+    for rows, label in ((good, "REPLIED WITH INTEREST after contact (strongest evidence of fit)"),
+                        (cold, "CONTACTED, NO INTEREST after two weeks (evidence against)")):
+        for r in rows:
+            out.append(f"- {label}: {r['company_name'] or '?'}: {(r['description'] or '')[:120]} | {r['sig'] or ''}")
     return "\n".join(out)
 
 

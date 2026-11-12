@@ -114,6 +114,8 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 table.t th{text-align:left;padding:8px 12px 8px 0;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-soft);border-bottom:1px solid var(--border)}
 table.t td{padding:10px 12px 10px 0;border-bottom:1px solid var(--sunken);vertical-align:top;overflow-wrap:anywhere}
 .scroll{overflow-x:auto}
+table.t.fixed{min-width:620px}
+table.t.fixed th,table.t.fixed td{white-space:nowrap;overflow-wrap:normal}
 .dial{flex:0 0 auto;width:132px;height:132px;border-radius:999px;display:flex;flex-direction:column;align-items:center;justify-content:center}
 .dial b{font:500 48px/1 var(--mono)}.dial span{font-size:12px;font-weight:600}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:12px 18px;border-radius:14px;box-shadow:var(--shadow-lg);font-size:14px;max-width:90vw;z-index:9}

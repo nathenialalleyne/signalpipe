@@ -58,7 +58,17 @@ One container, one SQLite file, no build step.
      first email to a verified address goes out unreviewed, and with LinkedIn connected so does the
      connection request to a known profile, with the follow-up released when they accept. You still
      choose which leads to approve.
-8. **SEO.** Crawls your site (robots, sitemap, titles, descriptions, headings, canonicals, thin
+8. **Learning.** Three loops run without you doing anything extra:
+   - *A/B testing.* Every approved lead gets one of four opening angles for its first email and
+     LinkedIn note (lead with the signal, the pain, a question, or proof). The angle is chosen by
+     Thompson sampling over past results, so openings that earn replies get most of the traffic while
+     untested ones still get tried.
+   - *Outcome tracking.* The Insights page shows the funnel and breaks reply, interest, LinkedIn
+     acceptance and wins down by opening, signal type, buyer level, score band and channel. A group
+     needs 10 contacted leads before its rate is treated as meaningful.
+   - *ICP feedback.* Scoring is calibrated on your approve and reject decisions and, more heavily, on
+     who actually replied with interest and who went quiet.
+9. **SEO.** Crawls your site (robots, sitemap, titles, descriptions, headings, canonicals, thin
    pages, duplicates, broken links, structured data, llms.txt), checks which buyer phrases have no
    page, and writes content briefs from those gaps and from prospect questions in your signals. It does
    not report search volume, rankings or backlinks; connect Search Console for those.

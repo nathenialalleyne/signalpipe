@@ -87,7 +87,7 @@ def _first_name(contact: dict | None) -> str:
     return name.split()[0] if name else ""
 
 
-def _template(lead: dict, contact: dict | None, signals: list[dict], brain: dict) -> dict:
+def _template(lead: dict, contact: dict | None, signals: list[dict], brain: dict, angle: str = "signal") -> dict:
     """No-LLM fallback. Deliberately plain; edit before sending."""
     hi = f"Hi {_first_name(contact)}," if _first_name(contact) else "Hi,"
     co = lead.get("company_name") or "your team"
@@ -105,7 +105,13 @@ def _template(lead: dict, contact: dict | None, signals: list[dict], brain: dict
     what = brain.get("one_liner") or brain.get("offer") or "we help with exactly that"
     proof = (brain.get("proof_points") or [""])[0]
     subj = f"{co.lower()} + {(brain.get('company') or 'us').lower()}"
-    e1 = f"{hi}\n\n{hook} Teams at that stage often tell us {pain[0].lower() + pain[1:]}.\n\n{what}\n\nIs that on your plate right now?"
+    low_pain = pain[0].lower() + pain[1:]
+    opening = {
+        "pain": f"A lot of teams tell us {low_pain}. {hook}",
+        "question": f"How is {co} handling this today: {low_pain}? {hook}",
+        "proof": f"{proof} {hook}" if proof else f"{hook} Teams at that stage often tell us {low_pain}.",
+    }.get(angle, f"{hook} Teams at that stage often tell us {low_pain}.")
+    e1 = f"{hi}\n\n{opening}\n\n{what}\n\nIs that on your plate right now?"
     e2 = f"{hi}\n\nOne more thought on my note below. {proof or 'Happy to share how others in your position handled this.'}\n\nWorth a short conversation?"
     e3 = f"{hi}\n\nI will close the loop here. If this is not a priority, no reply needed. If it is, I am glad to send over details."
     return {
@@ -137,11 +143,17 @@ async def draft_sequence(lead_id: int, channels: list[str] | None = None, replac
     elif db.one("SELECT 1 FROM messages WHERE lead_id=?", (lead_id,)):
         return {"skipped": "sequence already exists"}
 
-    seq = await llm.ask_json(SEQ_SYSTEM + "\n\n# Company\n" + brain_mod.summary(brain),
-                             _context(lead, contact, signals, brain), SEQ_SCHEMA, effort="medium", max_tokens=6000)
+    # A/B test: each lead gets one opening angle, chosen by how well each has done so far.
+    from . import insights
+    angle = insights.pick_angle(lead["play_id"])
+    db.x("UPDATE leads SET variant=? WHERE id=?", (angle, lead_id))
+    seq = await llm.ask_json(
+        SEQ_SYSTEM + "\n\n# Opening angle for email 1 and the LinkedIn note (an experiment; follow it)\n" +
+        insights.ANGLES[angle] + "\n\n# Company\n" + brain_mod.summary(brain),
+        _context(lead, contact, signals, brain), SEQ_SCHEMA, effort="medium", max_tokens=6000)
     source = "claude"
     if not seq or len(seq.get("emails", [])) < 1:
-        seq, source = _template(lead, contact, signals, brain), "template"
+        seq, source = _template(lead, contact, signals, brain, angle), "template"
 
     cid = contact["id"] if contact else None
     mode = db.get_setting("send_mode", "copilot")
@@ -180,7 +192,7 @@ async def draft_sequence(lead_id: int, channels: list[str] | None = None, replac
              "VALUES(?,?,?,?,?,?,?,?,?)",
              (lead_id, phone_contact["id"], "call", 1, "Call script", script, "draft", now + 86400, now))
         made.append("call")
-    return {"created": made, "source": source}
+    return {"created": made, "source": source, "angle": angle}
 
 
 # ---------- email sending ----------

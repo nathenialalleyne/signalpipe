@@ -426,3 +426,72 @@ def test_hands_off_linkedin_queues_invite_only_for_known_profiles(li):
                      linkedin_url="https://www.linkedin.com/search/results/people/?keywords=VP%20Sales%20Acme")
     run(outreach.draft_sequence(lid2))
     assert db.one("SELECT status FROM messages WHERE lead_id=? AND channel='linkedin' AND step=1", (lid2,))["status"] == "draft"
+
+
+# ---------- A/B testing and insights ----------
+
+def _reached(play_id, n, variant, replied, signal="hiring", title="CEO", score=70):
+    for i in range(n):
+        lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,status,score,variant,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                   (play_id, f"c:{variant}{signal}{title}{i}{replied}", f"Co {i}", "replied" if i < replied else "contacted",
+                    score, variant, db.now(), db.now()))
+        db.x("INSERT INTO signals(play_id,lead_id,source,type,title,url,occurred_at,hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+             (play_id, lid, "jobs", signal, "t", "u", db.now(), f"h{lid}", db.now()))
+        db.x("INSERT INTO contacts(lead_id,name,title,is_primary,created_at) VALUES(?,?,?,1,?)", (lid, "N", title, db.now()))
+
+
+def test_angle_is_assigned_and_stored():
+    from app import insights
+    lid = seed_lead(make_play())
+    res = run(outreach.draft_sequence(lid))
+    assert res["angle"] in insights.ANGLES
+    assert db.one("SELECT variant FROM leads WHERE id=?", (lid,))["variant"] == res["angle"]
+
+
+def test_ab_test_shifts_traffic_to_the_winner_but_keeps_exploring():
+    import random
+    from app import insights
+    pid = make_play()
+    rng = random.Random(7)
+    fresh = [insights.pick_angle(pid, rng) for _ in range(400)]
+    assert all(fresh.count(a) > 60 for a in insights.ANGLES)          # no data yet: every angle gets a fair share
+    _reached(pid, 30, "question", replied=12)                          # 40% reply
+    _reached(pid, 30, "signal", replied=2)                             # under 7%
+    picks = [insights.pick_angle(pid, rng) for _ in range(400)]
+    assert picks.count("signal") < 20                                  # the proven loser is all but dropped
+    assert picks.count("pain") > 60 and picks.count("proof") > 60      # untested angles are tried until they have data
+    _reached(pid, 30, "pain", replied=3)
+    _reached(pid, 30, "proof", replied=4)
+    picks = [insights.pick_angle(pid, rng) for _ in range(400)]
+    assert picks.count("question") > 340                               # with data on all four, the winner takes the traffic
+    assert len(set(picks)) > 1                                         # yet it never stops testing entirely
+
+
+def test_insights_report_segments_and_findings():
+    from app import insights
+    pid = make_play()
+    _reached(pid, 20, "question", replied=8, signal="funding", title="Founder", score=80)
+    _reached(pid, 20, "signal", replied=1, signal="hiring", title="Sales Manager", score=50)
+    db.x("INSERT INTO leads(play_id,lead_key,status,created_at,updated_at) VALUES(?,?,?,?,?)", (pid, "x1", "rejected", db.now(), db.now()))
+    r = insights.report(pid)
+    assert r["funnel"]["contacted"] == 40 and r["funnel"]["replied"] == 9 and r["funnel"]["reply_rate"] == 22.5
+    assert r["funnel"]["approval_rate"] == round(100 * 40 / 41, 1)
+    angle = {g["name"]: g for g in r["tables"]["angle"]}
+    assert angle["Leads with a question"]["reply_rate"] == 40.0 and angle["Leads with the signal"]["reply_rate"] == 5.0
+    assert r["tables"]["signal"][0]["name"] == "Funding" and r["tables"]["title"][0]["name"] == "Founder or CEO"
+    assert any('"Leads with a question" gets replies from 40% of leads (8 of 20), against 5%' in f for f in r["findings"])
+    assert r["enough_data"]
+    small = insights.report(make_play())
+    assert small["funnel"]["contacted"] == 0 and small["findings"] == [] and not small["enough_data"]
+
+
+def test_outcomes_feed_back_into_scoring_examples():
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,description,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+               (pid, "c:w", "Winner Inc", "Freight software", "won", db.now(), db.now()))
+    db.x("INSERT INTO leads(play_id,lead_key,company_name,description,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+         (pid, "c:l", "Silent LLC", "Staffing agency", "contacted", db.now() - 20 * 86400, db.now() - 20 * 86400))
+    text = scoring._examples()
+    assert "REPLIED WITH INTEREST after contact (strongest evidence of fit): Winner Inc" in text
+    assert "CONTACTED, NO INTEREST after two weeks (evidence against): Silent LLC" in text
+    assert lid

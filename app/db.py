@@ -92,6 +92,10 @@ def conn() -> sqlite3.Connection:
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.execute("PRAGMA busy_timeout=5000")
             _conn.executescript(SCHEMA)
+            # Columns added after the first release; safe to run on every start.
+            have = {r[1] for r in _conn.execute("PRAGMA table_info(leads)").fetchall()}
+            if "variant" not in have:
+                _conn.execute("ALTER TABLE leads ADD COLUMN variant TEXT")
         return _conn
 
 
