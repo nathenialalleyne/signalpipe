@@ -6,3 +6,4 @@ __pycache__/
 .pytest_cache/
 signalpipe-source.tar.gz
 screenshots/
+node_modules/

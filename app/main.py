@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import brain as brain_mod
-from . import config, db, enrich, linkedin, llm, outreach, pipeline, scoring, seo, validate, web
+from . import config, db, enrich, li_agent, linkedin, llm, outreach, pipeline, scoring, seo, validate, web
 from .collectors import SOURCE_INFO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -520,6 +520,18 @@ async def linkedin_disconnect():
 @app.post("/api/linkedin/sync", dependencies=[api])
 async def linkedin_sync():
     return await linkedin.sync()
+
+
+# ---------- local linkedin agent ----------
+
+@app.get("/api/agent/linkedin/work", dependencies=[api])
+async def agent_work():
+    return li_agent.next_work()
+
+
+@app.post("/api/agent/linkedin/result", dependencies=[api])
+async def agent_result(body: dict = Body(...)):
+    return await li_agent.apply_result(body)
 
 
 # ---------- inbox ----------

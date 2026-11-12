@@ -119,15 +119,59 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ## LinkedIn
 
-LinkedIn has no public API for reading post engagers or sending invitations. Hosted tools get this by
-running a session on your account through a provider; this app does the same through
-[Unipile](https://www.unipile.com) when `UNIPILE_DSN` and `UNIPILE_API_KEY` are set. Press **Connect
-LinkedIn** in Settings to sign in on Unipile's hosted page; your password never reaches this app.
+LinkedIn has no public API for reading post engagers or sending invitations. Tools that offer this
+operate your account as you. There are two ways to do the same here; without either, LinkedIn steps
+wait in a queue for you to send by hand.
+
+### Option 1: the agent on your own computer (free)
+
+`agent/linkedin-agent.mjs` drives your own Chrome, from your own network, signed in by you. It asks
+the server for one job at a time: send an invite, send a follow-up to someone who accepted, check who
+accepted, check for replies, read the pages a play watches. The server decides pacing and caps.
+
+```bash
+cd agent && npm install
+```
+
+```bash
+SIGNALPIPE_URL=https://your-host SIGNALPIPE_TOKEN=<API_TOKEN> node linkedin-agent.mjs run
+```
+
+A Chrome window opens on LinkedIn's sign-in page. Sign in once, including any verification code; the
+session is saved in the agent's own Chrome profile (`~/.signalpipe/chrome-profile`) and reused from
+then on. To let it sign in by itself when the session expires, also set `LINKEDIN_EMAIL` and
+`LINKEDIN_PASSWORD` in that shell. They are typed into LinkedIn's sign-in page and go nowhere else:
+not to the Signalpipe server, not into any file the agent writes.
+
+It works while your computer is on and the agent is running; steps approved while it is off go out
+when it next starts. If LinkedIn shows a security check, the agent stops, tells the app, and waits for
+you to sign in again. It does not try to get past the check, and it does not disguise itself as a
+non-automated browser, so LinkedIn can tell if it looks.
+
+The agent finds buttons by their English labels ("Connect", "Add a note", "Send", "Message"), all
+defined in one table at the top of the file. It has been tested end to end against a stand-in site
+(`tests/fake_linkedin.mjs`), **not against LinkedIn itself**, so expect to adjust that table on first
+use. To see what it detects on a real profile without doing anything:
+
+```bash
+node linkedin-agent.mjs doctor https://www.linkedin.com/in/someone
+```
+
+Tunables on the server: `LINKEDIN_DAILY_CAP` (20), `LINKEDIN_WEEKLY_CAP` (80), `LINKEDIN_HOURS`
+(`9-18`), `LINKEDIN_TZ`, `LINKEDIN_MIN_GAP_MIN` / `LINKEDIN_MAX_GAP_MIN` (8 and 20 minutes between
+sends), `LINKEDIN_FOLLOWUP_DELAY_HOURS` (`1-6`).
+
+### Option 2: Unipile (paid, always on)
+
+Set `UNIPILE_DSN` and `UNIPILE_API_KEY`, then press **Connect LinkedIn** in Settings to sign in on
+[Unipile](https://www.unipile.com)'s hosted page; your password never reaches this app. Unipile runs
+the session for you, so it works with your computer off.
+
+### Either way
 
 This is against LinkedIn's terms for third-party tools and carries account risk. Defaults are 20
 invites a day and 80 a week, sent one at a time during working hours with random spacing, and the
-sender pauses for 20 hours the moment LinkedIn signals a limit. Without Unipile the app never touches
-LinkedIn; you send each step yourself from the queue.
+sender pauses for 20 hours the moment LinkedIn signals a limit.
 
 ## Use it from Claude
 
