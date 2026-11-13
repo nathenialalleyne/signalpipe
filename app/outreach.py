@@ -295,7 +295,7 @@ async def send_due() -> dict:
 
 
 def stop_sequence(lead_id: int, reason: str) -> int:
-    return db.x("UPDATE messages SET status='skipped', error=? WHERE lead_id=? AND status IN ('draft','queued')",
+    return db.x("UPDATE messages SET status='skipped', error=? WHERE lead_id=? AND status IN ('draft','queued','sending')",
                 (reason, lead_id))
 
 

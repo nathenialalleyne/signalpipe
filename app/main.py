@@ -116,6 +116,12 @@ async def logout(response: Response):
 api = Depends(auth)
 
 
+@app.get("/api/auth/check", dependencies=[api])
+async def auth_check():
+    """Used by the web server to guard the agent's screen: 200 for a signed-in session, 401 otherwise."""
+    return {"ok": True}
+
+
 # ---------- status ----------
 
 @app.get("/api/status", dependencies=[api])
@@ -412,7 +418,7 @@ async def validate_phone(body: dict = Body(...)):
 async def outreach_queue(channel: str, status: str = "open"):
     if channel not in ("email", "linkedin", "call"):
         raise HTTPException(404)
-    cond = "m.status IN ('draft','queued','failed')" if status == "open" else "m.status IN ('sent','done','skipped')"
+    cond = "m.status IN ('draft','queued','sending','failed')" if status == "open" else "m.status IN ('sent','done','skipped')"
     rows = db.q(
         f"SELECT m.*, l.company_name, l.company_domain, l.score, l.status lead_status, l.linkedin_company_url, "
         f"c.name contact_name, c.title contact_title, c.email, c.email_status, c.phone, c.phone_detail, c.linkedin_url "

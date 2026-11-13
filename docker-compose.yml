@@ -1,4 +1,4 @@
-# Signalpipe plus Caddy for automatic HTTPS. Set DOMAIN in .env to a name pointing at this machine.
+# Signalpipe, its LinkedIn agent, and Caddy for automatic HTTPS. Set DOMAIN and API_TOKEN in .env.
 services:
   app:
     build: .
@@ -6,16 +6,37 @@ services:
     env_file: .env
     environment:
       COOKIE_SECURE: "1"
+      AGENT_SCREEN: "1"
     volumes:
       - data:/data
+
+  agent:
+    build: ./agent
+    restart: unless-stopped
+    environment:
+      SIGNALPIPE_URL: http://app:8000
+      SIGNALPIPE_TOKEN: ${API_TOKEN:?set API_TOKEN in .env}
+      # Optional. With these the agent signs itself in again when the session expires. Without them,
+      # sign in once through Settings, "Open the agent's screen". Wrap a password containing $ in single quotes.
+      LINKEDIN_EMAIL: ${LINKEDIN_EMAIL:-}
+      LINKEDIN_PASSWORD: ${LINKEDIN_PASSWORD:-}
+    shm_size: "1gb"
+    volumes:
+      - agent-profile:/home/node/.signalpipe
+    depends_on: [app]
+
   caddy:
     image: caddy:2
     restart: unless-stopped
     ports: ["80:80", "443:443"]
-    command: caddy reverse-proxy --from ${DOMAIN:?set DOMAIN in .env} --to app:8000
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
     volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy:/data
-    depends_on: [app]
+    depends_on: [app, agent]
+
 volumes:
   data:
+  agent-profile:
   caddy:
