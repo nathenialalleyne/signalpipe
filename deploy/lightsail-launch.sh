@@ -48,6 +48,7 @@ cat > /root/signalpipe-info.txt <<EOF
 Signalpipe is running.
 Address:  https://$DOMAIN
 Password: $APP_PASSWORD
+Agent:    SIGNALPIPE_URL=https://$DOMAIN SIGNALPIPE_TOKEN=$API_TOKEN node linkedin-agent.mjs run
 Settings: /opt/signalpipe/.env  (add API keys here, then run: cd /opt/signalpipe && docker compose up -d)
 Update:   cd /opt/signalpipe && git pull && docker compose up -d --build
 EOF
