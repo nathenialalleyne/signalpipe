@@ -31,10 +31,24 @@ def active() -> bool:
     return time.time() - db.get_setting("li_agent_seen", 0) < ACTIVE_WINDOW
 
 
+SCREEN_URL = "/screen/vnc.html?autoconnect=1&resize=scale&reconnect=1&path=screen/websockify"
+LEASE = 15 * 60  # a step handed to an agent is held this long before another agent may take it
+
+
+def on_server() -> bool:
+    """True when the agent runs in a container next to the app, with its window reachable from the dashboard."""
+    return config.env("AGENT_SCREEN") == "1"
+
+
 def status() -> dict:
     seen = db.get_setting("li_agent_seen", 0)
     return {"active": active(), "last_seen": seen, "online": time.time() - seen < 20 * 60,
-            "blocked": db.get_setting("li_agent_blocked", "")}
+            "blocked": db.get_setting("li_agent_blocked", ""), "on_server": on_server(),
+            "screen_url": SCREEN_URL if on_server() else ""}
+
+
+def _release_leases() -> None:
+    db.x("UPDATE messages SET status='queued', scheduled_at=? WHERE channel='linkedin' AND status='sending'", (time.time(),))
 
 
 def _idle(seconds: float, reason: str) -> dict:
@@ -60,8 +74,9 @@ def next_work() -> dict:
 
     # 1. A send that is due, inside working hours, under the caps, and not too soon after the last one.
     if linkedin._working_hours() and db.get_setting("li_agent_next_send_at", 0) <= now:
-        for m in db.q("SELECT * FROM messages WHERE channel='linkedin' AND status='queued' AND scheduled_at<=? "
-                      "ORDER BY step DESC, scheduled_at LIMIT 8", (now,)):
+        # 'sending' with a past scheduled_at is a lease that ran out (the agent holding it never answered).
+        for m in db.q("SELECT * FROM messages WHERE channel='linkedin' AND status IN ('queued','sending') "
+                      "AND scheduled_at<=? ORDER BY step DESC, scheduled_at LIMIT 8", (now,)):
             contact = db.one("SELECT * FROM contacts WHERE id=?", (m["contact_id"],))
             lead = db.one("SELECT * FROM leads WHERE id=?", (m["lead_id"],))
             if not contact or not lead or contact["do_not_contact"] or lead["status"] in ("replied", "won", "lost", "rejected"):
@@ -74,8 +89,10 @@ def next_work() -> dict:
             if m["step"] == 1:
                 if linkedin._invites_since(86400) >= config.LINKEDIN_DAILY_CAP or linkedin._invites_since(7 * 86400) >= linkedin.WEEKLY_CAP:
                     continue  # invites are capped; a follow-up to an existing connection may still go
+                db.x("UPDATE messages SET status='sending', scheduled_at=? WHERE id=?", (now + LEASE, m["id"]))
                 return {"kind": "invite", "message_id": m["id"], "profile_url": url, "name": contact["name"] or "",
                         "note": (m["body"] or "")[: linkedin.NOTE_MAX]}
+            db.x("UPDATE messages SET status='sending', scheduled_at=? WHERE id=?", (now + LEASE, m["id"]))
             return {"kind": "message", "message_id": m["id"], "profile_url": url, "name": contact["name"] or "",
                     "text": m["body"] or ""}
 
@@ -126,7 +143,12 @@ async def apply_result(r: dict) -> dict:
     if kind == "blocked":  # LinkedIn showed a sign-in or verification page: stop and wait for the person
         why = (r.get("reason") or "LinkedIn asked you to sign in or verify")[:200]
         db.set_setting("li_agent_blocked", why)
-        db.set_setting("linkedin_error", f"LinkedIn agent stopped: {why}. Run the agent's login command.")
+        if on_server():
+            db.set_setting("linkedin_error", f"LinkedIn agent is waiting for you: {why}. Open Settings, "
+                                             "then \"Open the agent's screen\", and sign in there.")
+        else:
+            db.set_setting("linkedin_error", f"LinkedIn agent stopped: {why}. Run the agent's login command.")
+        _release_leases()
         return {"ok": True}
 
     if kind in ("invite", "message"):
@@ -145,6 +167,7 @@ async def apply_result(r: dict) -> dict:
             linkedin._release_followup(m["lead_id"])
         elif out == "limit":
             db.set_setting("linkedin_pause_until", now + 20 * 3600)
+            db.x("UPDATE messages SET status='queued', scheduled_at=? WHERE id=?", (now, m["id"]))
         elif out == "not_connected":
             db.x("UPDATE messages SET status='draft', error='Not connected to this person yet' WHERE id=?", (m["id"],))
         else:

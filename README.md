@@ -90,13 +90,14 @@ Caddy issues the HTTPS certificate for `DOMAIN`. Data lives in the `data` volume
 
 ### On AWS Lightsail
 
-1. In the Lightsail console create an instance: Linux, **Ubuntu 24.04**, the 1 GB plan (the 512 MB
-   plan works but builds slowly). Under **Add launch script**, paste the contents of
+1. In the Lightsail console create an instance: Linux, **Ubuntu 24.04**, the **2 GB** plan (the
+   LinkedIn agent runs a browser; 1 GB works with swap but is tight). Under **Add launch script**,
+   paste the contents of
    [`deploy/lightsail-launch.sh`](deploy/lightsail-launch.sh). To use your own domain, fill in
    `DOMAIN=""` at the top of the script first.
 2. On the instance's **Networking** tab, attach a static IP and add a firewall rule for **HTTPS (443)**.
    Port 80 must stay open too; it is used to issue the certificate.
-3. After about five minutes, open the browser SSH terminal and read the address and generated password:
+3. After about ten minutes, open the browser SSH terminal and read the address and generated password:
 
    ```bash
    sudo cat /root/signalpipe-info.txt
@@ -130,10 +131,40 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 ## LinkedIn
 
 LinkedIn has no public API for reading post engagers or sending invitations. Tools that offer this
-operate your account as you. There are two ways to do the same here; without either, LinkedIn steps
-wait in a queue for you to send by hand.
+operate your account as you. There are three ways to do the same here; without any of them, LinkedIn
+steps wait in a queue for you to send by hand.
 
-### Option 1: the agent on your own computer (free)
+### Option 1: the agent on the server (free, always on; the default)
+
+`docker compose` starts the agent in its own container next to the app (`agent/Dockerfile`). It runs
+Chromium as a normal window on a virtual display and works through the queue around the clock, within
+your working hours and caps.
+
+- **Signing in.** Open **Settings**, then **Open the agent's screen**: that is the agent's browser
+  window, in your browser. Sign in to LinkedIn there once, including any code LinkedIn sends you. The
+  session is kept in the `agent-profile` volume, so restarts and reboots do not sign it out. To let it
+  sign itself back in when a session expires, add `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` to `.env`
+  (wrap a password containing `$` in single quotes) and run `sudo docker compose up -d`.
+- **Security checks.** If LinkedIn shows one, the agent stops, the dashboard says it needs you, and
+  the step goes back in the queue. Open the agent's screen and complete the check; the agent notices
+  within about 20 seconds and carries on. It never tries to complete a check itself.
+- **Access.** Only people signed in to Signalpipe can open the screen: the web server asks the app to
+  confirm the session before passing anything through (`deploy/Caddyfile`).
+- **The biggest risk is the address.** On the server, LinkedIn sees your account active from an AWS
+  data-centre IP, not from your home or office. That is a strong signal and the most likely reason
+  for a security check, especially at first sign-in. The agent does not hide or change its address.
+  If that matters more to you than always-on, use Option 2 instead and stop the server agent with
+  `sudo docker compose stop agent`.
+
+Check what it sees on a real profile without doing anything:
+
+```bash
+cd /opt/signalpipe && sudo docker compose exec agent node linkedin-agent.mjs doctor https://www.linkedin.com/in/someone
+```
+
+Its log is `sudo docker compose logs -f agent`.
+
+### Option 2: the agent on your own computer (free, while your computer is on)
 
 `agent/linkedin-agent.mjs` drives your own Chrome, from your own network, signed in by you. It asks
 the server for one job at a time: send an invite, send a follow-up to someone who accepted, check who
@@ -154,7 +185,10 @@ then on. To let it sign in by itself when the session expires, also set `LINKEDI
 not to the Signalpipe server, not into any file the agent writes.
 
 It works while your computer is on and the agent is running; steps approved while it is off go out
-when it next starts.
+when it next starts. Run only one agent per LinkedIn account: if the server agent is also running,
+stop it first (`sudo docker compose stop agent`). Each step is handed to one agent at a time, so two
+agents never send the same step, but two browsers on two networks acting as one person is a signal of
+its own.
 
 By default the agent starts your ordinary Chrome as a normal window and attaches to it, so the
 browser is not running in the automation mode that pages can see. It works the page the way you
@@ -182,7 +216,7 @@ Tunables on the server: `LINKEDIN_DAILY_CAP` (20), `LINKEDIN_WEEKLY_CAP` (80), `
 (`9-18`), `LINKEDIN_TZ`, `LINKEDIN_MIN_GAP_MIN` / `LINKEDIN_MAX_GAP_MIN` (8 and 20 minutes between
 sends), `LINKEDIN_FOLLOWUP_DELAY_HOURS` (`1-6`).
 
-### Option 2: Unipile (paid, always on)
+### Option 3: Unipile (paid, always on)
 
 Set `UNIPILE_DSN` and `UNIPILE_API_KEY`, then press **Connect LinkedIn** in Settings to sign in on
 [Unipile](https://www.unipile.com)'s hosted page; your password never reaches this app. Unipile runs
@@ -214,8 +248,12 @@ Unipile's documented responses) are covered by `tests/`.
 
 Written from the vendors' documentation but not yet run against a real account: Claude calls (no API
 key was available), Unipile, Hunter, Twilio Lookup, GitHub stargazers, and IMAP polling.
-The Docker image and the compose stack (app behind Caddy) were built and started locally; certificate
-issuance and the Lightsail launch script have not been run on a real instance.
+The full compose stack (app, LinkedIn agent container and Caddy) was built and run locally against the
+stand-in LinkedIn site: the server agent signed in with saved credentials, sent invites and a
+follow-up, kept its session across a container restart, stopped on a security check, and carried on
+after the check was cleared by hand through the dashboard's screen; the screen refuses anyone not
+signed in. Certificate issuance and the Lightsail launch script have not been run on a real instance,
+and the agent has not been run against LinkedIn itself.
 
 ## Sending responsibly
 

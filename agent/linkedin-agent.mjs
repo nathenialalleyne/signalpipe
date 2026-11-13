@@ -3,6 +3,8 @@
  * Signalpipe LinkedIn agent. Runs on YOUR computer and drives YOUR Chrome, signed in as you.
  *
  *   node linkedin-agent.mjs run              sign in once in the window that opens, then it works on its own
+ *   node linkedin-agent.mjs run --server     never exit: when LinkedIn wants a person, report it and wait
+ *                                            (used on the server, where you reach the window from the dashboard)
  *   node linkedin-agent.mjs login            only sign in (by hand, or with LINKEDIN_EMAIL / LINKEDIN_PASSWORD)
  *   node linkedin-agent.mjs doctor <url>     show what the agent sees on a profile, without acting
  *
@@ -114,12 +116,18 @@ async function launch(headless = cfg.headless) {
     '--no-default-browser-check', '--window-size=1280,900', '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
     ...(headless ? ['--headless=new'] : []), ...cfg.chromeArgs, 'about:blank'],
-  { stdio: 'ignore' });
+  { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr = (stderr + d).slice(-1500); });  // keep draining, keep the tail
   let up = false;
   for (let i = 0; i < 120 && !up && child.exitCode === null; i++) {
     try { up = (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; } catch { await new Promise((r) => setTimeout(r, 250)); }
   }
-  if (!up) { child.kill(); throw new Error('Chrome did not start. Is another agent already running with this profile?'); }
+  if (!up) {
+    child.kill();
+    const why = stderr.trim().split('\n').filter((l) => /error|fatal|missing|cannot|failed|profile/i.test(l)).slice(-3).join(' | ');
+    throw new Error(`Chrome did not start (exit ${child.exitCode}). ${why || 'Is another agent already running with this profile?'}`);
+  }
   const browser = await pw.chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const close = async () => {
     try { await (await browser.newBrowserCDPSession()).send('Browser.close'); } catch { /* already gone */ }
@@ -491,13 +499,43 @@ async function cmdDoctor(url) {
   await close();
 }
 
+/** Server mode: tell the dashboard a person is needed, then wait (indefinitely) until they have dealt with it
+ *  in the agent's window. Nothing is navigated or typed while waiting. */
+async function waitForPerson(page, reason) {
+  await api('POST', '/result', { kind: 'blocked', reason }).catch((e) => log('could not report:', e.message));
+  log(`Waiting for you: ${reason}. Open the agent's screen from the dashboard.`);
+  let clear = 0, beat = Date.now();
+  while (clear < 2) {
+    await new Promise((r) => setTimeout(r, 10000));
+    let blocked = true;
+    try { blocked = page.isClosed() || onBlockedPage(page) || page.url() === 'about:blank'; } catch { /* page navigating */ }
+    clear = blocked ? 0 : clear + 1;
+    if (Date.now() - beat > 5 * 60 * 1000) {  // keep the dashboard's "last seen" fresh while waiting
+      beat = Date.now();
+      await api('POST', '/result', { kind: 'blocked', reason }).catch(() => {});
+    }
+  }
+  await api('POST', '/result', { kind: 'ready' });
+  log('Signed in again. Carrying on.');
+}
+
 async function cmdRun() {
   if (!cfg.server || !cfg.token) { console.error('Set SIGNALPIPE_URL and SIGNALPIPE_TOKEN first.'); process.exit(1); }
   const maxWork = Number(opt('--max-work', Infinity));
+  const serverMode = flag('--server') || env.LINKEDIN_SERVER === '1';
   const { ctx, close } = await launch();
   const page = await workPage(ctx);
   const stop = async (code) => { await close().catch(() => {}); process.exit(code); };
   process.on('SIGINT', () => stop(0));
+  process.on('SIGTERM', () => stop(0));
+  if (serverMode) {
+    if (!(await ensureSignedIn(page, false))) {
+      if (onBlockedPage(page) && !/\/login/.test(new URL(page.url()).pathname)) await waitForPerson(page, 'LinkedIn asked for a security check');
+      else await waitForPerson(page, 'not signed in to LinkedIn');
+    } else await api('POST', '/result', { kind: 'ready' });
+    log('Signed in. Asking Signalpipe for work.');
+    return serve(page, maxWork, stop, true);
+  }
   // First run, or the session ended: the window is on LinkedIn's sign-in page. Sign in there once and the
   // agent carries on by itself; the session is kept in its own Chrome profile for next time.
   const canWait = !cfg.headless && !flag('--no-wait');
@@ -509,6 +547,10 @@ async function cmdRun() {
   }
   await api('POST', '/result', { kind: 'ready' });
   log('Signed in. Asking Signalpipe for work.');
+  return serve(page, maxWork, stop, false);
+}
+
+async function serve(page, maxWork, stop, serverMode) {
   let done = 0;
   while (done < maxWork) {
     const work = await api('GET', '/work');
@@ -523,6 +565,10 @@ async function cmdRun() {
       result = await HANDLERS[work.kind](page, work);
     } catch (e) {
       if (e instanceof Blocked) {
+        if (serverMode) {  // the step was not reported, so it stays queued and is retried afterwards
+          await waitForPerson(page, e.message);
+          continue;
+        }
         await api('POST', '/result', { kind: 'blocked', reason: e.message });
         log('Stopped:', e.message, '\nRun: node linkedin-agent.mjs login');
         return stop(2);
@@ -542,4 +588,4 @@ const cmd = args[0];
 if (cmd === 'login') await cmdLogin();
 else if (cmd === 'run') await cmdRun();
 else if (cmd === 'doctor' && args[1]) await cmdDoctor(args[1]);
-else { console.log('Usage: node linkedin-agent.mjs login | run [--max-work N] [--exit-on-idle] | doctor <profile url>'); process.exit(1); }
+else { console.log('Usage: node linkedin-agent.mjs login | run [--server] [--max-work N] [--exit-on-idle] | doctor <profile url>'); process.exit(1); }

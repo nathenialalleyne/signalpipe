@@ -495,3 +495,39 @@ def test_outcomes_feed_back_into_scoring_examples():
     assert "REPLIED WITH INTEREST after contact (strongest evidence of fit): Winner Inc" in text
     assert "CONTACTED, NO INTEREST after two weeks (evidence against): Silent LLC" in text
     assert lid
+
+
+# ---------- server agent: one step goes to one agent ----------
+
+def test_agent_lease_hands_each_step_out_once(monkeypatch):
+    from app import li_agent
+    monkeypatch.setattr(linkedin, "_working_hours", lambda now=None: True)
+    monkeypatch.setattr(li_agent, "MIN_GAP", 0)
+    monkeypatch.setattr(li_agent, "MAX_GAP", 0)
+    li_agent.next_work()                                         # first check-in: the agent counts as connected
+    db.set_setting("send_mode", "auto")
+    lid = seed_lead(make_play())
+    run(outreach.draft_sequence(lid))
+    first = li_agent.next_work()
+    assert first["kind"] == "invite"
+    assert li_agent.next_work()["kind"] != "invite"              # a second agent asking now gets nothing to send
+    assert db.one("SELECT status FROM messages WHERE id=?", (first["message_id"],))["status"] == "sending"
+    run(li_agent.apply_result({"kind": "blocked", "reason": "LinkedIn showed /checkpoint"}))
+    assert db.one("SELECT status FROM messages WHERE id=?", (first["message_id"],))["status"] == "queued"  # released
+    run(li_agent.apply_result({"kind": "ready"}))
+    again = li_agent.next_work()
+    assert again["message_id"] == first["message_id"]
+    run(li_agent.apply_result({"kind": "invite", "message_id": again["message_id"], "outcome": "limit"}))
+    assert db.one("SELECT status FROM messages WHERE id=?", (first["message_id"],))["status"] == "queued"
+    db.set_setting("linkedin_pause_until", 0)
+    db.x("UPDATE messages SET status='sending', scheduled_at=? WHERE id=?", (db.now() - 1, first["message_id"]))
+    assert li_agent.next_work()["message_id"] == first["message_id"]  # an expired lease is handed out again
+
+
+def test_screen_link_only_on_server(monkeypatch):
+    from app import li_agent
+    assert li_agent.status()["screen_url"] == ""
+    monkeypatch.setenv("AGENT_SCREEN", "1")
+    assert li_agent.status()["screen_url"].startswith("/screen/vnc.html")
+    run(li_agent.apply_result({"kind": "blocked", "reason": "not signed in to LinkedIn"}))
+    assert "Open the agent's screen" in db.get_setting("linkedin_error")
