@@ -14,6 +14,12 @@ if ! command -v uv >/dev/null 2>&1; then
   fi
 fi
 
+if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+  echo "To run the agents on your Claude subscription, install Claude Code once:"
+  echo "  curl -fsSL https://claude.ai/install.sh | bash"
+  echo "then run: claude   (and sign in with your Claude account), and start Signalpipe again."
+  echo
+fi
 echo "Starting Signalpipe (the first start downloads its packages, a few minutes)..."
 uv run --quiet --no-project --python 3.13 --with-requirements requirements-local.txt python -m app.local "$@"
 status=$?

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 
 from . import brain as brain_mod
-from . import (actions, agentkit, config, content, copilot, db, enrich, insights, li_agent, linkedin, llm, local_agent,
+from . import (actions, agentkit, claude_code, config, content, copilot, db, enrich, insights, li_agent, linkedin, llm, local_agent,
                mailsetup, outreach, pipeline, reengage, research, review, scoring, seo, validate, web)
 from .collectors import SOURCE_INFO
 
@@ -173,7 +173,8 @@ async def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM leads GROUP BY status")}
     return {
         "config": config.status(), "linkedin": {**linkedin.state(), "local_agent": local_agent.status()},
-        "usage": llm.usage_this_month(), "llm_error": llm.last_error, "send_mode": db.get_setting("send_mode", "copilot"),
+        "usage": llm.usage_this_month(), "llm_error": llm.last_error,
+        "claude_code": await claude_code.auth_status() if config.ENGINE == "claude_code" else None, "send_mode": db.get_setting("send_mode", "copilot"),
         "brain_ready": bool(brain_mod.get().get("one_liner")), "leads": counts,
         "plays": db.one("SELECT COUNT(*) n FROM plays")["n"],
         "signals_7d": db.one("SELECT COUNT(*) n FROM signals WHERE created_at>?", (db.now() - 7 * 86400,))["n"],
@@ -409,6 +410,11 @@ async def agent_toggle(name: str, body: dict = Body(...)):
         raise HTTPException(404)
     agentkit.set_on(name, bool(body.get("on")))
     return agentkit.overview()
+
+
+@app.post("/api/claude-code/check", dependencies=[api])
+async def claude_code_check():
+    return await claude_code.auth_status(fresh=True)
 
 
 @app.get("/api/copilot", dependencies=[api])

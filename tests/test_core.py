@@ -864,6 +864,8 @@ def test_agents_run_on_claude_code_through_the_bridge(monkeypatch, tmp_path):
     fake.write_text(f"""#!{sys.executable}
 import json, subprocess, sys
 args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty"}})); sys.exit()
 prompt = sys.stdin.read()
 assert "ANTHROPIC_API_KEY" not in __import__("os").environ
 if "--json-schema" in args:
@@ -883,6 +885,7 @@ print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "s
 """)
     fake.chmod(0o755)
     monkeypatch.setattr(claude_code, "binary", lambda: str(fake))
+    monkeypatch.setattr(claude_code, "_auth_cache", (0.0, {}))
     monkeypatch.setattr(config, "ENGINE", "claude_code")
     monkeypatch.setattr(config, "LLM_ENABLED", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
@@ -908,3 +911,28 @@ print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "s
     import time as _t
     db.set_setting("usage", {_t.strftime("%Y-%m"): {"usd": 5.0, "calls": 1}})
     assert not llm.over_budget()                                             # a plan has limits, not a bill
+
+
+def test_subscription_is_the_local_default_and_api_accounts_are_refused(monkeypatch, tmp_path):
+    from app import claude_code
+    monkeypatch.setenv("SIGNALPIPE_LOCAL", "1")
+    monkeypatch.delenv("SIGNALPIPE_ENGINE", raising=False)
+    config._load()
+    assert config.ENGINE == "claude_code"
+    monkeypatch.setenv("SIGNALPIPE_LOCAL", "0")
+    config._load()
+    assert config.ENGINE == "api"
+    fake = tmp_path / "claude"
+    fake.write_text(f"""#!{sys.executable}
+import json, sys
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "console_api_key", "apiProvider": "firstParty"}})); sys.exit()
+raise SystemExit("must not run an agent on an API account")
+""")
+    fake.chmod(0o755)
+    monkeypatch.setattr(claude_code, "binary", lambda: str(fake))
+    st = run(claude_code.auth_status(fresh=True))
+    assert st == {"installed": True, "signed_in": True, "subscription": False, "method": "console_api_key"}
+    res = run(claude_code.run(system="s", prompt="p"))
+    assert not res["ok"] and "API account" in res["error"]
+    monkeypatch.setattr(claude_code, "_auth_cache", (0.0, {}))

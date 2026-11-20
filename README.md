@@ -95,7 +95,7 @@ Nothing an agent does sends a message: drafts wait in Outreach under your sendin
 
 ### Use your Claude subscription instead of an API key
 
-In **Settings**, choose **My Claude subscription**. Signalpipe then runs Claude through
+On your own computer this is the default: Signalpipe runs Claude through
 [Claude Code](https://code.claude.com/docs) signed in to your Pro or Max plan, so there is no separate
 bill. Install Claude Code once on the same computer (inside WSL on Windows), then run `claude` and sign
 in with your Claude account:
@@ -104,7 +104,10 @@ in with your Claude account:
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-Restart Signalpipe so it finds it. How it works: each agent run is one `claude -p` call; the agent's own
+Restart Signalpipe so it finds it; **Settings** shows whether Claude Code is signed in to your plan.
+If Claude Code is signed in with a Console (API) account instead, the agents refuse to run rather than
+bill the API. An API key is still available under Settings for servers, but nothing uses it unless you
+switch to it. How it works: each agent run is one `claude -p` call; the agent's own
 tools are offered to Claude Code as a small MCP server (`app/cc_bridge.py`) that passes each call back to
 Signalpipe, and web research uses Claude Code's own WebSearch and WebFetch. Nothing else is allowed (no
 shell, no file access). Any `ANTHROPIC_API_KEY` is removed from Claude Code's environment so it cannot
@@ -135,8 +138,8 @@ Things to know:
 
    The first start installs [uv](https://docs.astral.sh/uv/) (which sets up the right Python) and
    Signalpipe's packages, then opens Signalpipe in your browser. Later starts take seconds.
-3. In **Settings**: connect Claude (your subscription through Claude Code, or an API key; see
-   [Agents](#agents)), type your email address (the server settings fill in for
+3. Install Claude Code and sign in with your Claude account so the agents run on your subscription
+   (see [Agents](#agents)). In **Settings**, type your email address (the server settings fill in for
    known providers) and an app password, press **Save and test**, then press **Connect LinkedIn** and
    sign in once in the Chrome window that opens.
 4. In **Brain**, enter your website. In **Plays**, create a play and press **Run now**.

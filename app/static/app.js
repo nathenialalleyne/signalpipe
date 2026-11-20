@@ -90,7 +90,7 @@ async function viewToday() {
   const steps = [
     [st.brain_ready, 'Teach it your business', 'Enter your website so it learns what you sell and who buys.', '#/brain'],
     [st.plays > 0, 'Create a play', 'A play is a standing search for one kind of buyer.', '#/plays'],
-    [c.llm, 'Connect Claude', 'An API key, or your Claude subscription through Claude Code. Without it there are no agents, scoring is keyword matching and messages are templates.', '#/settings'],
+    [c.llm && (c.engine !== 'claude_code' || st.claude_code?.subscription !== false && st.claude_code?.signed_in !== false), 'Connect your Claude subscription', 'Install Claude Code and sign in with your Claude account. Without it there are no agents, scoring is keyword matching and messages are templates.', '#/settings'],
     [c.smtp, 'Connect your mailbox', 'Emails go out from your own address.', '#/settings'],
     [st.linkedin?.enabled, 'Connect LinkedIn', 'Optional. Without it you send LinkedIn steps by hand from a queue.', '#/settings'],
   ];
@@ -307,7 +307,7 @@ async function viewAgents() {
     <div class="small soft" style="margin-top:8px">${esc(r.subject || '')}${r.usd ? ` · $${(+r.usd).toFixed(3)}` : ''}${r.searches ? ` · ${r.searches} searches` : ''}${r.finished_at ? ` · ${Math.max(1, Math.round(r.finished_at - r.started_at))}s` : ''}</div>
     ${(r.steps || []).length ? `<div class="steps-list">${r.steps.map((s) => `<div><span class="pill ${s.error ? 'blush' : ''}">${esc(s.tool.replace(/_/g, ' '))}</span> <code>${esc(s.input || '')}</code>${s.result ? `<div class="soft" style="margin:2px 0 0 8px">${esc(s.result)}</div>` : ''}</div>`).join('')}</div>` : ''}</details>`).join('');
   frame(`${head(spend, 'Agents', `<button class="btn" data-act="agentRefresh">Refresh</button>`)}
-  ${!ov.llm ? `<div class="card tight"><span class="pill butter">Off</span> Connect Claude in <a href="#/settings">Settings</a> to start the agents: an API key, or your Claude subscription through Claude Code.</div>` : ''}
+  ${!ov.llm ? `<div class="card tight"><span class="pill butter">Off</span> Connect your Claude subscription in <a href="#/settings">Settings</a> to start the agents.</div>` : ''}
   ${ov.faq_open ? `<div class="card tight"><span class="pill butter">${ov.faq_open}</span> The Inbox agent has questions only you can answer. <a href="#/brain">Answer them on the Brain page</a>.</div>` : ''}
   <div class="split"><section class="a col" aria-label="Copilot"><div class="card lg col"><div class="row between"><h2>Copilot</h2>${cp.log.length ? '<button class="btn sm" data-act="copilotReset">New conversation</button>' : ''}</div>
     <div class="chat" id="chat">${chat || `<p class="small soft">Ask it to do things in plain words. It uses the same actions as the dashboard and can call the other agents. It never sends messages; that stays in Outreach.</p><div class="row" style="gap:6px">${COPILOT_IDEAS.map((t) => `<button class="btn sm" data-act="copilotSuggest" data-text="${esc(t)}">${esc(t)}</button>`).join('')}</div>`}</div>
@@ -317,23 +317,33 @@ async function viewAgents() {
   const c = document.getElementById('chat'); if (c) c.scrollTop = c.scrollHeight;
 }
 
-const claudeSettings = (c, cn, field, pill, u) => {
-  const sub = (cn.SIGNALPIPE_ENGINE || 'api') === 'claude_code';
-  const ccState = c.claude_code ? '<span class="pill mint">Claude Code found on this computer</span>' : '<span class="pill butter">Claude Code is not installed yet</span>';
-  return `<section class="card lg col"><div class="row between"><h2>Claude</h2>${pill(c.llm, sub ? 'On, subscription' : 'On, API key')}</div>
-    <p class="small soft">Runs the agents, scores leads against your customer profile and writes your messages. Pick how Signalpipe reaches Claude.</p>
+const claudeSettings = (c, cn, field, pill, u, cc) => {
+  const sub = c.engine === 'claude_code';
+  cc = cc || {};
+  const state = !c.claude_code ? ['butter', 'Claude Code is not installed yet']
+    : cc.signed_in === false ? ['butter', 'Installed, not signed in']
+    : cc.subscription === false ? ['blush', 'Signed in with an API account, which would bill API usage']
+    : cc.subscription ? ['mint', 'Signed in to your Claude plan'] : ['sky', 'Installed'];
+  const how = !c.claude_code
+    ? `<p class="small">Install it once in a terminal on this computer (in WSL on Windows):</p><div class="well mono">curl -fsSL https://claude.ai/install.sh | bash</div><p class="small">Then run <span class="mono">claude</span>, sign in with your Claude account, and restart Signalpipe.</p>`
+    : cc.signed_in === false ? '<p class="small">Open a terminal, run <span class="mono">claude</span>, and sign in with your Claude account (Pro or Max). Then press Check again.</p>'
+    : cc.subscription === false ? '<p class="small">Run <span class="mono">claude auth logout</span>, then <span class="mono">claude</span>, and sign in with your Claude account instead of a Console account. Agents will not run until then, so nothing is billed to the API.</p>'
+    : '<p class="small soft">Agents run on your plan and count toward its usage limits, the same ones you share with claude.ai. There is no API bill.</p>';
+  return `<section class="card lg col"><div class="row between"><h2>Claude</h2>${pill(c.llm, sub ? 'On, your subscription' : 'On, API key')}</div>
+    <p class="small soft">Runs the agents, scores leads against your customer profile and writes your messages.</p>
+    ${sub ? `<div class="col" style="gap:10px"><div class="row between"><span class="row" style="gap:8px"><span class="pill ${state[0]}">${esc(state[1])}</span><span class="small soft">through Claude Code on this computer</span></span><button class="btn sm" data-act="ccCheck">Check again</button></div>${how}</div>` : `<p class="small"><span class="pill butter">API key</span> Signalpipe is set to bill an Anthropic API key. Switch to your subscription below.</p>`}
     <form class="col" data-form="conn" style="gap:14px">
-      <div class="row" style="gap:12px;align-items:stretch">
-        <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="claude_code" ${sub ? 'checked' : ''}><span class="col" style="gap:4px"><b style="font-weight:600">My Claude subscription</b><span class="small soft">Through Claude Code on this computer, signed in to your Pro or Max plan. No extra bill; it uses your plan's usage limits, which you share with claude.ai.</span></span></label>
-        <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="api" ${sub ? '' : 'checked'}><span class="col" style="gap:4px"><b style="font-weight:600">An API key</b><span class="small soft">Pay per use from the Claude Console. Works on a server too. The monthly cap below keeps spend in check.</span></span></label></div>
-      <div class="col" style="gap:8px"><div class="eyebrow">Subscription</div><div class="row" style="gap:8px">${ccState}</div>
-        ${c.claude_code ? '<p class="small soft">If it is not signed in yet, open a terminal, run <span class="mono">claude</span>, and sign in with your Claude account. That is all.</p>' : '<p class="small">Install it once in a terminal on this computer (in WSL on Windows), then run <span class="mono">claude</span> and sign in with your Claude account:</p><div class="well mono">curl -fsSL https://claude.ai/install.sh | bash</div><p class="small soft">Restart Signalpipe afterwards so it finds Claude Code.</p>'}
-        <details><summary class="small" style="cursor:pointer">Signing in on a server instead</summary><p class="small soft" style="margin:8px 0">Run <span class="mono">claude setup-token</span> on any computer where you are signed in, and paste the token here.</p>${field('CLAUDE_CODE_OAUTH_TOKEN', 'Claude Code token', { secret: true })}</details></div>
-      <div class="col" style="gap:8px"><div class="eyebrow">API key</div>${field('ANTHROPIC_API_KEY', 'API key', { secret: true, ph: 'sk-ant-...' })}</div>
-      <div class="grid2"><label class="f">Model<select class="i" name="SIGNALPIPE_MODEL">${[['claude-opus-5-5', 'Opus 5.5, best results'], ['claude-sonnet-5-5', 'Sonnet 5.5, about half the cost'], ['claude-haiku-5-5', 'Haiku 5.5, cheapest, weaker research']].map(([v, l]) => `<option value="${v}" ${(cn.SIGNALPIPE_MODEL || 'claude-opus-5-5') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-        ${field('RESEARCH_PER_RUN', 'Leads the People finder researches per play run', { type: 'number', ph: '5' })}
-        ${field('AGENT_BUDGET_USD', 'Monthly cap on API spend, in dollars (0 for none)', { type: 'number', ph: '20', attrs: 'step="1" min="0"' })}</div>
-      ${!sub && u.usd ? `<p class="small soft">About $${u.usd.toFixed(2)} spent this month.</p>` : ''}
+      <div class="grid2"><label class="f">Model<select class="i" name="SIGNALPIPE_MODEL">${[['claude-opus-5-5', 'Opus 5.5, best results'], ['claude-sonnet-5-5', 'Sonnet 5.5, lighter on your limits'], ['claude-haiku-5-5', 'Haiku 5.5, lightest, weaker research']].map(([v, l]) => `<option value="${v}" ${(cn.SIGNALPIPE_MODEL || 'claude-opus-5-5') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        ${field('RESEARCH_PER_RUN', 'Leads the People finder researches per play run', { type: 'number', ph: '5' })}</div>
+      ${sub ? '<input type="hidden" name="SIGNALPIPE_ENGINE" value="claude_code">' : ''}
+      <details ${sub ? '' : 'open'}><summary class="small" style="cursor:pointer">${sub ? 'Use a paid API key instead (not recommended for you)' : 'How Signalpipe reaches Claude'}</summary>
+        <div class="col" style="gap:12px;margin-top:12px">
+          <div class="row" style="gap:12px;align-items:stretch">
+            <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="claude_code" ${sub ? 'checked' : ''}><span class="col" style="gap:4px"><b style="font-weight:600">My Claude subscription</b><span class="small soft">Through Claude Code on this computer. No API bill.</span></span></label>
+            <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="api" ${sub ? '' : 'checked'}><span class="col" style="gap:4px"><b style="font-weight:600">An API key</b><span class="small soft">Billed per use by the Claude Console.</span></span></label></div>
+          <div class="grid2">${field('ANTHROPIC_API_KEY', 'API key', { secret: true, ph: 'sk-ant-...' })}${field('AGENT_BUDGET_USD', 'Monthly cap on API spend, dollars (0 for none)', { type: 'number', ph: '20', attrs: 'step="1" min="0"' })}</div>
+          ${!sub && u.usd ? `<p class="small soft">About $${u.usd.toFixed(2)} of API spend this month.</p>` : ''}
+          <details><summary class="small" style="cursor:pointer">Subscription on a server</summary><p class="small soft" style="margin:8px 0">Run <span class="mono">claude setup-token</span> where you are signed in and paste the token here.</p>${field('CLAUDE_CODE_OAUTH_TOKEN', 'Claude Code token', { secret: true })}</details></div></details>
       <div class="row"><button class="btn primary">Save</button></div></form></section>`;
 };
 
@@ -358,7 +368,7 @@ async function viewSettings() {
     : li.via === 'provider' ? `<p class="small"><span class="pill mint">Connected</span> ${li.account ? 'Signed in as ' + esc(li.account) + '. ' : ''}${li.sent_this_week} of ${li.weekly_cap} invites used this week.</p>`
     : `<p class="small soft">Not connected, so LinkedIn steps wait in a queue for you to send by hand. See the README for running the LinkedIn agent with a server deployment.</p>`;
   frame(`${head(c.local ? 'Saved on this computer only' : 'Saved here; these take precedence over environment variables', 'Settings')}
-  ${claudeSettings(c, cn, field, pill, st.usage || {})}
+  ${claudeSettings(c, cn, field, pill, st.usage || {}, st.claude_code)}
 
   <section class="card lg col"><div class="row between"><h2>Email</h2><span class="row" style="gap:6px">${pill(c.smtp, 'Sending on', 'Sending off')}${pill(c.imap, 'Replies on', 'Replies off')}</span></div>
     <p class="small soft">Emails go out from your own mailbox, and replies are read from it so a sequence stops when someone answers.</p>
@@ -419,6 +429,7 @@ const A = {
   approve: async (id, btn) => { btn.disabled = true; btn.textContent = S.status?.config?.llm ? 'Finding people and drafting, about a minute' : 'Drafting'; const r = await api(`/leads/${id}/approve`, { method: 'POST', body: {} }); const ppl = r.research && !r.research.error ? `Found ${r.research.people} people. ` : ''; toast(`${ppl}Approved. Drafted ${(r.sequence.created || []).length} steps${r.sequence.source === 'template' ? ' from templates' : r.sequence.source === 'writer agent' ? ' with the Writer' : ''}.`); S.leadId = null; return render(); },
   research: async (id, btn) => { btn.disabled = true; btn.textContent = 'Searching, about a minute'; const r = await api(`/leads/${id}/research`, { method: 'POST' }); toast(`Found ${r.result.people} people, ${r.result.added} new, using ${r.result.searches} searches.`); return loadLead(id); },
   agentRefresh: () => render(),
+  ccCheck: async (_, btn) => { btn.disabled = true; const r = await api('/claude-code/check', { method: 'POST' }); toast(r.subscription ? 'Signed in to your Claude plan.' : r.signed_in === false ? 'Not signed in yet.' : r.installed ? 'Checked.' : 'Claude Code is not installed.'); return render(); },
   copilotReset: async () => { if (!confirm('Start a new conversation? The Copilot forgets this one.')) return; await api('/copilot/reset', { method: 'POST' }); return render(); },
   copilotSuggest: async (_, btn) => { const i = root.querySelector('[data-form="copilot"] textarea'); if (i) { i.value = btn.dataset.text; i.focus(); } },
   seoDraft: async (id, btn) => { const b = (S.seoPlan || [])[+id]; if (!b) return; btn.disabled = true; btn.textContent = 'Researching and writing, a few minutes'; await api('/seo/draft', { method: 'POST', body: { brief: b } }); toast('Draft written.'); return render(); },

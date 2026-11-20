@@ -41,7 +41,9 @@ def _load() -> None:
     # Claude. The Anthropic SDK reads ANTHROPIC_API_KEY itself.
     g["LLM_MODEL"] = env("SIGNALPIPE_MODEL", "claude-opus-5-5")
     g["LLM_ENABLED"] = env("SIGNALPIPE_LLM", "1") != "0"
-    g["ENGINE"] = env("SIGNALPIPE_ENGINE", "api") if env("SIGNALPIPE_ENGINE", "api") in ENGINES else "api"
+    # On your own computer Claude runs on your subscription through Claude Code unless you choose an API key.
+    default_engine = "claude_code" if g["LOCAL"] else "api"
+    g["ENGINE"] = env("SIGNALPIPE_ENGINE", default_engine) if env("SIGNALPIPE_ENGINE", default_engine) in ENGINES else default_engine
     g["USER_AGENT"] = env("SIGNALPIPE_USER_AGENT", "signalpipe/1.0 (+lead research; respects robots.txt)")
 
     # Outbound email, through your own mailbox.

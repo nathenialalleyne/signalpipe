@@ -50,6 +50,35 @@ def installed() -> bool:
     return binary() is not None
 
 
+_auth_cache: tuple[float, dict] = (0.0, {})
+
+
+async def auth_status(fresh: bool = False) -> dict:
+    """Whether Claude Code is installed and signed in, and whether that sign-in is a Claude plan (not an API key).
+    Runs `claude auth status`, which reads local state only and uses no usage. Cached for a minute."""
+    import time
+    global _auth_cache
+    if not fresh and time.time() - _auth_cache[0] < 60:
+        return _auth_cache[1]
+    exe = binary()
+    out = {"installed": bool(exe), "signed_in": False, "subscription": False, "method": ""}
+    if exe:
+        try:
+            proc = await asyncio.create_subprocess_exec(exe, "auth", "status", "--json", env=_env(),
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            raw, _ = await asyncio.wait_for(proc.communicate(), 15)
+            data = json.loads(raw.decode() or "{}")
+            method = str(data.get("authMethod") or "")
+            out.update(signed_in=bool(data.get("loggedIn")), method=method,
+                       subscription=bool(data.get("loggedIn")) and "api" not in method.lower()
+                       and str(data.get("apiProvider") or "firstParty") == "firstParty")
+        except Exception as e:  # an older Claude Code without `auth status`: let the first run say
+            log.info("claude auth status unavailable: %s", e)
+            out.update(signed_in=None, subscription=None)
+    _auth_cache = (time.time(), out)
+    return out
+
+
 async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """One request per connection from the bridge: {"token", "op": "list"|"call", "name", "args"}."""
     try:
@@ -118,6 +147,14 @@ async def run(*, system: str, prompt: str, tools: list | None = None, web: bool 
     if not exe:
         return {"ok": False, "error": "Claude Code is not installed on this computer. See Settings for the one-line install.",
                 "steps": []}
+    auth = await auth_status()
+    if auth.get("signed_in") is False:
+        last_error = _friendly("not signed in, please log in")
+        return {"ok": False, "error": last_error, "steps": []}
+    if auth.get("subscription") is False:  # signed in with a Console account or key: that would bill the API
+        last_error = ("Claude Code is signed in with an API account, which would bill API usage. Run `claude auth logout`, "
+                      "then `claude` and sign in with your Claude Pro or Max account.")
+        return {"ok": False, "error": last_error, "steps": []}
     tools = tools or []
     token = secrets.token_urlsafe(24)
     _runs[token] = {"tools": {t.name: t for t in tools}, "steps": []}
