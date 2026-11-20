@@ -105,6 +105,18 @@ To update, download the ZIP again (or `git pull`) and start it the same way; you
 
 If the Mac launcher will not open at all, open Terminal in that folder and run `bash start-linux.sh`.
 
+**On Windows with WSL**: run `./start-linux.sh` in your WSL terminal and open the link it prints in
+your Windows browser. For LinkedIn, the agent needs a Chrome inside WSL; Windows 11's WSLg shows its
+window on your desktop. Install it once:
+
+```bash
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+```
+
+```bash
+sudo apt install -y ./google-chrome-stable_current_amd64.deb
+```
+
 ### On a server
 
 ```bash
