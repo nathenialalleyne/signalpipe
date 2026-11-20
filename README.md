@@ -73,6 +73,57 @@ One container, one SQLite file, no build step.
    page, and writes content briefs from those gaps and from prospect questions in your signals. It does
    not report search volume, rankings or backlinks; connect Search Console for those.
 
+## Agents
+
+Eight agents share one engine (`app/agentkit.py`): Claude gets a set of tools, uses them, sees the
+results and keeps going until the job is done. Every run is logged on the **Agents** page with each step
+it took and what it cost, each agent can be switched off there, and a monthly cap in Settings stops all
+of them when API spend reaches it.
+
+| Agent | What it does | When it runs |
+| --- | --- | --- |
+| Prospector | Searches the web for companies that fit your profile and show a trigger now, plus lookalikes of leads you approved and won, skipping ones you rejected | Play runs with the `agent` source |
+| People finder | Finds the named buyers at a company, with LinkedIn profiles it actually saw and work emails it checked; records why each is the right person and hooks for the message | Best new leads after each play run, and on approve |
+| Writer | Writes the sequence from the evidence, may read the page behind a signal, and has every draft checked by code (length, no exclamation marks or em dashes, no stock phrases, the LinkedIn note limit); failing drafts are refused until fixed | On approve |
+| Inbox | Handles a reply by acting on it: schedules the follow-up for "try me in March", adds the person you were referred to with an intro draft, records a meeting or a no, honours an unsubscribe, and asks you what your profile cannot answer instead of guessing | Each reply |
+| Re-engagement | When a lead that went quiet three weeks ago shows a new signal, drafts a message about it | Every 30 minutes, if any |
+| Strategist | Reads a week of results and proposes changes to keywords, competitors, buyer titles, disqualifiers and messaging, which you apply on the Insights page | Weekly |
+| Content writer | Turns a brief on the SEO page into a researched article draft with sources | When you press Write the draft |
+| Copilot | A chat on the Agents page that runs the rest: "find 15 logistics companies that raised money this month", "research the top five", "why are replies low?" | When you ask |
+
+Nothing an agent does sends a message: drafts wait in Outreach under your sending rules.
+
+### Use your Claude subscription instead of an API key
+
+On your own computer this is the default: Signalpipe runs Claude through
+[Claude Code](https://code.claude.com/docs) signed in to your Pro or Max plan, so there is no separate
+bill. Install Claude Code once on the same computer (inside WSL on Windows), then run `claude` and sign
+in with your Claude account:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Restart Signalpipe so it finds it; **Settings** shows whether Claude Code is signed in to your plan.
+If Claude Code is signed in with a Console (API) account instead, the agents refuse to run rather than
+bill the API. An API key is still available under Settings for servers, but nothing uses it unless you
+switch to it. How it works: each agent run is one `claude -p` call; the agent's own
+tools are offered to Claude Code as a small MCP server (`app/cc_bridge.py`) that passes each call back to
+Signalpipe, and web research uses Claude Code's own WebSearch and WebFetch. Nothing else is allowed (no
+shell, no file access). Any `ANTHROPIC_API_KEY` is removed from Claude Code's environment so it cannot
+bill the API instead.
+
+Things to know:
+- Usage counts toward your plan's limits, the same 5-hour and weekly ones you share with claude.ai and
+  Claude Code. Heavy play runs with many researched leads can use a lot; lower "Leads the People finder
+  researches per play run" if you hit them. When a limit is reached, agents stop with that message and
+  the rest of the dashboard keeps working.
+- Anthropic allows signing in with your subscription for your own use of Claude Code. This is a
+  single-user tool you run yourself, which fits that; it would not be right to offer it to other people
+  on your login.
+- On a server, run `claude setup-token` where you are signed in and paste the token into Settings.
+  The Docker image does not include Claude Code, so the subscription option is meant for running locally.
+
 ## Run it
 
 ### On your own computer (recommended)
@@ -87,7 +138,8 @@ One container, one SQLite file, no build step.
 
    The first start installs [uv](https://docs.astral.sh/uv/) (which sets up the right Python) and
    Signalpipe's packages, then opens Signalpipe in your browser. Later starts take seconds.
-3. In **Settings**: paste a Claude API key, type your email address (the server settings fill in for
+3. Install Claude Code and sign in with your Claude account so the agents run on your subscription
+   (see [Agents](#agents)). In **Settings**, type your email address (the server settings fill in for
    known providers) and an app password, press **Save and test**, then press **Connect LinkedIn** and
    sign in once in the Chrome window that opens.
 4. In **Brain**, enter your website. In **Plays**, create a play and press **Run now**.
@@ -104,6 +156,18 @@ connection, the same one you use LinkedIn from yourself. It needs Chrome, Edge o
 To update, download the ZIP again (or `git pull`) and start it the same way; your data is untouched.
 
 If the Mac launcher will not open at all, open Terminal in that folder and run `bash start-linux.sh`.
+
+**On Windows with WSL**: run `./start-linux.sh` in your WSL terminal and open the link it prints in
+your Windows browser. For LinkedIn, the agent needs a Chrome inside WSL; Windows 11's WSLg shows its
+window on your desktop. Install it once:
+
+```bash
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+```
+
+```bash
+sudo apt install -y ./google-chrome-stable_current_amd64.deb
+```
 
 ### On a server
 
@@ -285,8 +349,13 @@ Playwright package, which signed in to the stand-in site and sent invites and a 
 second time opened the running copy; quitting closed the LinkedIn browser too. The Mac and Windows
 launchers have not been run, for lack of a Mac or Windows machine.
 
-Written from the vendors' documentation but not yet run against a real account: Claude calls (no API
-key was available), Unipile, Hunter, Twilio Lookup, GitHub stargazers, and IMAP polling.
+The agents were tested with the real Anthropic SDK against a scripted stand-in for the Messages API
+(tool calls, paused turns, refusals, budget stops), and with a stand-in `claude` binary that drives the
+real MCP bridge. The subscription engine was also run against real Claude Code: a Copilot conversation
+looked up leads through the bridge and remembered the earlier turn.
+
+Written from the vendors' documentation but not yet run against a real account: the API-key agent runs
+against the live API with web search, Unipile, Hunter, Twilio Lookup, GitHub stargazers, and IMAP polling.
 The full compose stack (app, LinkedIn agent container and Caddy) was built and run locally against the
 stand-in LinkedIn site: the server agent signed in with saved credentials, sent invites and a
 follow-up, kept its session across a container restart, stopped on a security check, and carried on

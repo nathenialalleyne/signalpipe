@@ -1,6 +1,7 @@
 """Offline tests: no network, no API keys. External services are faked at their boundaries."""
 import asyncio
 import os
+import sys
 import time
 
 import pytest
@@ -598,3 +599,340 @@ def test_local_agent_gets_only_what_it_needs(monkeypatch):
     node, core = local_agent.runtime()
     assert os.path.exists(node) and os.path.exists(os.path.join(core, "index.js"))
     assert local_agent.script().exists()
+
+
+# ---------- agents (the Claude API is replaced by a scripted stand-in at the HTTP layer) ----------
+
+def _scripted_claude(monkeypatch, turns):
+    """Make the real SDK talk to a fake Messages API that answers with `turns` in order. Returns the requests seen."""
+    import httpx2 as httpx
+    import json as _json
+    import anthropic
+    from app import llm
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        seen.append(body)
+        content, stop = turns[min(len(seen) - 1, len(turns) - 1)](body)
+        return httpx.Response(200, json={
+            "id": f"msg_{len(seen)}", "type": "message", "role": "assistant", "model": body["model"],
+            "content": content, "stop_reason": stop, "stop_sequence": None,
+            "usage": {"input_tokens": 1000, "output_tokens": 200,
+                      "server_tool_use": {"web_search_requests": sum(1 for b in content if b.get("type") == "server_tool_use")}}})
+
+    client = anthropic.AsyncAnthropic(api_key="test-key", max_retries=0,
+                                      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(llm, "_client", client)
+    monkeypatch.setattr(llm, "_get", lambda: client)
+    monkeypatch.setattr(config, "LLM_ENABLED", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    return seen
+
+
+def _tool_results(body):
+    return {b["tool_use_id"]: b for m in body["messages"] if m["role"] == "user" and isinstance(m["content"], list)
+            for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"}
+
+
+def test_people_finding_agent_end_to_end(monkeypatch):
+    from app import enrich, research
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,company_domain,description,status,score,created_at,updated_at) "
+               "VALUES(?,?,?,?,?,?,?,?,?)", (pid, "d:acme.io", "Acme", "acme.io", "Freight software", "new", 80, db.now(), db.now()))
+    db.x("INSERT INTO signals(play_id,lead_id,source,type,title,url,occurred_at,hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+         (pid, lid, "jobs", "hiring", "Acme is hiring: SDR", "https://jobs/1", db.now(), "h1", db.now()))
+
+    async def fake_site(domain, use_llm=True):
+        assert domain == "acme.io"
+        return {"ok": True, "title": "Acme", "description": "Freight", "people": [{"name": "Dana Reyes", "title": "VP Sales", "linkedin_url": ""}],
+                "emails": ["info@acme.io"], "phones": [], "linkedin_company_url": "https://www.linkedin.com/company/acme", "pages": ["https://acme.io/team"]}
+    monkeypatch.setattr(enrich, "crawl_company", fake_site)
+
+    turns = [
+        # 1: search the web, then read the company's site
+        lambda b: ([{"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "Acme VP Sales LinkedIn"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                        {"type": "web_search_result", "url": "https://www.linkedin.com/in/dana-reyes-acme", "title": "Dana Reyes - VP Sales - Acme",
+                         "encrypted_content": "x", "page_age": None}]},
+                    {"type": "tool_use", "id": "toolu_1", "name": "read_company_site", "input": {"domain": "acme.io"}}], "tool_use"),
+        # 2: a long server-side turn pauses; the runner must send it back to continue
+        lambda b: ([{"type": "text", "text": "Checking more sources."}], "pause_turn"),
+        # 3: check an email address
+        lambda b: ([{"type": "tool_use", "id": "toolu_2", "name": "find_work_email", "input": {"name": "Dana Reyes", "domain": "acme.io"}}], "tool_use"),
+        # 4: save, including a made-up LinkedIn URL for a second person and an invented email, which must be dropped
+        lambda b: ([{"type": "tool_use", "id": "toolu_3", "name": "save_people", "input": {
+            "people": [{"name": "Dana Reyes", "title": "VP Sales", "linkedin_url": "https://www.linkedin.com/in/dana-reyes-acme?trk=x",
+                        "email": "dana.reyes@acme.io", "why": "Owns the new SDR team.", "evidence": ["https://acme.io/team", "not a url"]},
+                       {"name": "Lee Park", "title": "CEO", "linkedin_url": "https://example.com/lee", "email": "lee@nomail.io",
+                        "why": "Founder.", "evidence": []}],
+            "summary": "Acme is hiring its first SDRs.", "hooks": ["Hiring two SDRs (https://jobs/1)"]}}], "tool_use"),
+        lambda b: ([{"type": "text", "text": "Done."}], "end_turn"),
+    ]
+    seen = _scripted_claude(monkeypatch, turns)
+    res = run(research.research_lead(lid))
+    assert res == {"people": 2, "added": 2, "searches": 1}
+    # the tools really ran and their results went back to Claude
+    assert '"linkedin_company_page": "https://www.linkedin.com/company/acme"' in _tool_results(seen[1])["toolu_1"]["content"]
+    assert len(seen) == 5 and seen[2]["messages"][-1]["role"] == "assistant"   # paused turn re-sent as is
+    email_result = _tool_results(seen[3])["toolu_2"]["content"]
+    assert '"email": "dana.reyes@acme.io"' in email_result
+    tools = {t.get("name"): t for t in seen[0]["tools"]}
+    assert tools["web_search"]["type"] == "web_search_20260209" and seen[0]["output_config"]["effort"] == "medium"
+    dana = db.one("SELECT * FROM contacts WHERE name='Dana Reyes'")
+    assert dana["linkedin_url"] == "https://www.linkedin.com/in/dana-reyes-acme" and dana["source"] == "research"
+    assert dana["email"] == "dana.reyes@acme.io" and "found_by_agent" in dana["email_detail"]["flags"] and dana["is_primary"] == 1
+    lee = db.one("SELECT * FROM contacts WHERE name='Lee Park'")
+    assert "/search/" in lee["linkedin_url"] and lee["email"] is None        # bad profile URL and dead address dropped
+    lead = db.one("SELECT research FROM leads WHERE id=?", (lid,))
+    assert lead["research"]["hooks"] == ["Hiring two SDRs (https://jobs/1)"]
+    assert lead["research"]["people"][0]["evidence"] == ["https://acme.io/team"]
+    from app import llm
+    assert llm.usage_this_month()["calls"] == 5 and llm.usage_this_month()["searches"] == 1
+
+
+def test_research_reports_a_refusal_and_needs_a_key(monkeypatch):
+    from app import research
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+               (pid, "c:x", "X", "new", db.now(), db.now()))
+    assert "API key" in run(research.research_lead(lid))["error"]
+    _scripted_claude(monkeypatch, [lambda b: ([], "refusal")])
+    assert "declined" in run(research.research_lead(lid))["error"]
+    assert db.one("SELECT research FROM leads WHERE id=?", (lid,))["research"] is None
+
+
+def test_weekly_review_proposes_and_applies(monkeypatch):
+    from app import llm, review
+    pid = make_play(keywords=["cold email", "crm"], competitors=["HubSpot"])
+    for i in range(12):
+        db.x("INSERT INTO leads(play_id,lead_key,company_name,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+             (pid, f"c:{i}", f"Agency {i}", "rejected", "staffing agency, not a buyer", db.now(), db.now()))
+    assert review.due()
+    captured = {}
+
+    async def fake_ask(system, prompt, schema, effort="low", max_tokens=8000):
+        captured["prompt"] = prompt
+        return {"suggestions": [
+            {"kind": "remove_keyword", "play_id": pid, "value": "CRM", "why": "12 rejections came from it"},
+            {"kind": "add_disqualifier", "play_id": 0, "value": "staffing agency", "why": "12 notes say staffing agency"},
+            {"kind": "messaging_note", "play_id": 0, "value": "Mention setup time.", "why": "replies asked"},
+            {"kind": "add_competitor", "play_id": 999, "value": "Nope", "why": "bad play id is dropped"}]}
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    run(review.run())
+    assert "staffing agency, not a buyer" in captured["prompt"]
+    open_ = review.state()["suggestions"]
+    assert [s["kind"] for s in open_] == ["remove_keyword", "add_disqualifier", "messaging_note"]
+    for s in open_:
+        assert review.decide(s["id"], apply=True)["ok"]
+    assert db.one("SELECT config FROM plays WHERE id=?", (pid,))["config"]["keywords"] == ["cold email"]
+    assert "staffing agency" in brain.get()["icp"]["disqualifiers"]
+    assert brain.get()["message_notes"] == ["Mention setup time."]
+    assert "What replies have taught us: Mention setup time." in brain.summary(brain.get())
+    assert review.decide(open_[0]["id"], apply=True)["error"]                # cannot apply twice
+    assert not review.due()                                                  # ran this week
+
+
+def test_prospector_adds_new_companies_and_skips_known(monkeypatch):
+    from app import pipeline, prospector
+    pid = make_play()
+    db.x("INSERT INTO leads(play_id,lead_key,company_name,company_domain,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+         (pid, "d:known.io", "Known Co", "known.io", "new", db.now(), db.now()))
+    turns = [
+        lambda b: ([{"type": "tool_use", "id": "toolu_1", "name": "add_companies", "input": {"companies": [
+            {"name": "Fresh Freight", "domain": "https://www.freshfreight.com/about", "source_url": "https://news.example/fresh",
+             "trigger": "Raised $8M (Nov 2026)", "why": "Freight team scaling sales."},
+            {"name": "Known Co", "domain": "known.io", "source_url": "https://news.example/known", "trigger": "x", "why": "y"},
+            {"name": "No Source Inc", "domain": "", "source_url": "", "trigger": "x", "why": "y"}]}}], "tool_use"),
+        lambda b: ([{"type": "text", "text": "Found one."}], "end_turn"),
+    ]
+    seen = _scripted_claude(monkeypatch, turns)
+    found, result = run(prospector.find(db.one("SELECT config FROM plays WHERE id=?", (pid,))["config"], "freight", 5))
+    assert result.ok and [s.company_name for s in found] == ["Fresh Freight"]
+    assert found[0].company_domain == "freshfreight.com" and found[0].type == "agent_found"
+    assert "Known Co" in seen[0]["messages"][0]["content"]                 # told what to skip
+    assert "Added 1, skipped 2" in _tool_results(seen[1])["toolu_1"]["content"]
+    _, new_leads, _ = pipeline.ingest(pid, found)
+    assert new_leads == 1
+    runs = db.q("SELECT * FROM agent_runs WHERE agent='prospector'")
+    assert runs[0]["status"] == "ok" and runs[0]["summary"].startswith("Found 1 new")
+
+
+def test_writer_refuses_drafts_that_break_the_rules(monkeypatch):
+    from app import writer
+    bad = [{"subject": "Quick question!", "body": "word " * 120}, {"subject": "Re: x", "body": "ok"}, {"subject": "Re: x", "body": "ok"}]
+    problems = writer.check(bad, "n" * 400, 300)
+    assert any("120 words" in p for p in problems) and any("exclamation" in p for p in problems)
+    assert any("quick question" in p for p in problems) and any("LinkedIn note is 400" in p for p in problems)
+    assert writer.check([{"subject": "Your SDR hires", "body": "Hi Dana, saw the SDR roles."}] * 3, "Hi Dana", 300) == []
+
+
+def test_inbox_agent_acts_on_a_reply(monkeypatch):
+    from app import inbox
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+               (pid, "c:acme", "Acme", "replied", db.now(), db.now()))
+    cid = db.x("INSERT INTO contacts(lead_id,name,email,email_status,created_at) VALUES(?,?,?,?,?)",
+               (lid, "Dana Reyes", "dana@acme.io", "valid", db.now()))
+    turns = [
+        lambda b: ([{"type": "tool_use", "id": "toolu_1", "name": "schedule_follow_up", "input": {"days": 60, "message": "Hi Dana, you said March."}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "ask_founder", "input": {"question": "Do you integrate with Salesforce?"}}], "tool_use"),
+        lambda b: ([{"type": "tool_use", "id": "toolu_3", "name": "save_reply", "input": {"intent": "not_now", "draft": "Thanks Dana. [ANSWER]"}}], "tool_use"),
+        lambda b: ([{"type": "text", "text": "Handled."}], "end_turn"),
+    ]
+    _scripted_claude(monkeypatch, turns)
+    contact = db.one("SELECT * FROM contacts WHERE id=?", (cid,))
+    out = run(inbox.handle(db.one("SELECT * FROM leads WHERE id=?", (lid,)), contact,
+                           [{"subject": "Your SDR hires", "body": "Hi"}], "Not now, try me in March. Do you work with Salesforce?", "dana@acme.io"))
+    assert out["intent"] == "not_now" and out["draft"].startswith("Thanks Dana")
+    follow = db.one("SELECT * FROM messages WHERE lead_id=?", (lid,))
+    assert follow["status"] == "draft" and follow["subject"] == "Re: Your SDR hires" and follow["scheduled_at"] > db.now() + 59 * 86400
+    assert brain.get()["faq"] == [{"q": "Do you integrate with Salesforce?", "a": ""}]
+    assert db.one("SELECT status FROM leads WHERE id=?", (lid,))["status"] == "contacted"
+
+
+def test_reengagement_drafts_when_a_quiet_lead_shows_a_new_signal(monkeypatch):
+    from app import llm, pipeline, reengage
+    from app.collectors import Signal
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,company_domain,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+               (pid, "d:quiet.io", "Quiet", "quiet.io", "contacted", db.now(), db.now()))
+    cid = db.x("INSERT INTO contacts(lead_id,name,email,email_status,is_primary,created_at) VALUES(?,?,?,?,?,?)",
+               (lid, "Sam", "sam@quiet.io", "valid", 1, db.now()))
+    db.x("INSERT INTO messages(lead_id,contact_id,channel,step,subject,body,status,sent_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+         (lid, cid, "email", 1, "Old", "Old body", "sent", db.now() - 30 * 86400, db.now() - 30 * 86400))
+    pipeline.ingest(pid, [Signal(source="funding", type="funding", title="Quiet raised $5M", url="https://n/q", text="", occurred_at=db.now(),
+                                 company_name="Quiet", company_domain="quiet.io")])
+    assert db.get_setting("reengage_queue") == [lid]
+
+    async def fake_ask(system, prompt, schema, effort="low", max_tokens=8000):
+        assert "Quiet raised $5M" in prompt and "Old body" in prompt
+        return {"subject": "Congrats on the round", "body": "Hi Sam, saw the $5M."}
+    monkeypatch.setattr(llm, "ask_json", fake_ask)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    assert run(reengage.run_queue()) == 1
+    m = db.one("SELECT * FROM messages WHERE lead_id=? AND status='draft'", (lid,))
+    assert m["subject"] == "Congrats on the round"
+    assert db.get_setting("reengage_queue") == []
+    assert run(reengage.run_queue()) == 0 and not reengage._eligible(lid)        # a draft is waiting now
+
+
+def test_budget_cap_stops_every_agent(monkeypatch):
+    from app import agentkit, llm, research
+    pid = make_play()
+    lid = db.x("INSERT INTO leads(play_id,lead_key,company_name,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+               (pid, "c:b", "B", "new", db.now(), db.now()))
+    _scripted_claude(monkeypatch, [lambda b: ([{"type": "text", "text": "hi"}], "end_turn")])
+    monkeypatch.setattr(config, "AGENT_BUDGET_USD", 1.0)
+    import time as _t
+    db.set_setting("usage", {_t.strftime("%Y-%m"): {"usd": 1.5, "calls": 9}})
+    assert "budget is used up" in run(research.research_lead(lid))["error"]
+    assert run(llm.ask_json("s", "p", llm.obj({"a": llm.STR}))) is None and "budget" in llm.last_error
+    agentkit.set_on("people", False)
+    monkeypatch.setattr(config, "AGENT_BUDGET_USD", 0.0)
+    assert "switched off" in run(research.research_lead(lid))["error"]
+    assert run(research.research_lead(lid, force=True)).get("error", "") != "switched off"
+
+
+def test_copilot_keeps_the_conversation_and_uses_tools(monkeypatch):
+    from app import copilot
+    pid = make_play()
+    db.x("INSERT INTO leads(play_id,lead_key,company_name,status,score,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+         (pid, "c:top", "Top Co", "new", 91, db.now(), db.now()))
+    turns = [
+        lambda b: ([{"type": "tool_use", "id": "toolu_1", "name": "search_leads", "input": {"min_score": 80}}], "tool_use"),
+        lambda b: ([{"type": "text", "text": "Your best lead is Top Co (#1)."}], "end_turn"),
+        lambda b: ([{"type": "text", "text": "You asked about Top Co."}], "end_turn"),
+    ]
+    seen = _scripted_claude(monkeypatch, turns)
+    r = run(copilot.ask("What is my best lead?"))
+    assert r["ok"] and "Top Co" in r["reply"] and '"company": "Top Co"' in _tool_results(seen[1])["toolu_1"]["content"]
+    run(copilot.ask("What did I ask?"))
+    assert seen[2]["messages"][0]["content"] == "What is my best lead?" and len(seen[2]["messages"]) == 5
+    log = copilot.transcript()
+    assert [e["role"] for e in log] == ["you", "copilot", "you", "copilot"] and log[1]["steps"] == ["search_leads"]
+    copilot.reset()
+    assert copilot.transcript() == []
+
+
+def test_agents_run_on_claude_code_through_the_bridge(monkeypatch, tmp_path):
+    """A stand-in `claude` that does what Claude Code does: starts the MCP server it was given, lists its tools,
+    calls one, and prints a JSON result. The real tool runs inside Signalpipe."""
+    from app import agentkit, claude_code, llm
+    fake = tmp_path / "claude"
+    fake.write_text(f"""#!{sys.executable}
+import json, subprocess, sys
+args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty"}})); sys.exit()
+prompt = sys.stdin.read()
+assert "ANTHROPIC_API_KEY" not in __import__("os").environ
+if "--json-schema" in args:
+    print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "result": "",
+                      "structured_output": {{"color": "red"}}, "session_id": "s1"}})); sys.exit()
+cfg = json.load(open(args[args.index("--mcp-config") + 1]))["mcpServers"]["signalpipe"]
+p = subprocess.Popen([cfg["command"], *cfg["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def rpc(i, method, params):
+    p.stdin.write(json.dumps({{"jsonrpc": "2.0", "id": i, "method": method, "params": params}}) + "\\n"); p.stdin.flush()
+    return json.loads(p.stdout.readline())
+rpc(1, "initialize", {{"protocolVersion": "2025-06-18"}})
+tools = rpc(2, "tools/list", {{}})["result"]["tools"]
+out = rpc(3, "tools/call", {{"name": tools[0]["name"], "arguments": {{"word": "hello"}}}})["result"]
+p.stdin.close(); p.wait()
+print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "session_id": "s2",
+                  "result": "tool said " + out["content"][0]["text"] + " | allowed " + args[args.index("--allowedTools") + 1]}}))
+""")
+    fake.chmod(0o755)
+    monkeypatch.setattr(claude_code, "binary", lambda: str(fake))
+    monkeypatch.setattr(claude_code, "_auth_cache", (0.0, {}))
+    monkeypatch.setattr(config, "ENGINE", "claude_code")
+    monkeypatch.setattr(config, "LLM_ENABLED", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    from anthropic import beta_async_tool
+
+    @beta_async_tool
+    async def shout(word: str) -> str:
+        """Shout a word.
+
+        Args:
+            word: The word.
+        """
+        return word.upper()
+
+    res = run(agentkit.run("copilot", system="s", messages=[{"role": "user", "content": "hi"}], tools=[shout],
+                           web=agentkit.web_tools(config.LLM_MODEL), subject="t"))
+    assert res.ok and res.final_text == "tool said HELLO | allowed WebSearch,WebFetch,mcp__signalpipe" and res.session_id == "s2"
+    assert res.steps[0]["tool"] == "shout" and res.usd == 0
+    row = db.one("SELECT * FROM agent_runs WHERE id=?", (res.run_id,))
+    assert row["status"] == "ok" and row["steps"][0]["result"] == "HELLO"
+    assert run(llm.ask_json("s", "p", llm.obj({"color": llm.STR}))) == {"color": "red"}
+    monkeypatch.setattr(config, "AGENT_BUDGET_USD", 0.01)
+    import time as _t
+    db.set_setting("usage", {_t.strftime("%Y-%m"): {"usd": 5.0, "calls": 1}})
+    assert not llm.over_budget()                                             # a plan has limits, not a bill
+
+
+def test_subscription_is_the_local_default_and_api_accounts_are_refused(monkeypatch, tmp_path):
+    from app import claude_code
+    monkeypatch.setenv("SIGNALPIPE_LOCAL", "1")
+    monkeypatch.delenv("SIGNALPIPE_ENGINE", raising=False)
+    config._load()
+    assert config.ENGINE == "claude_code"
+    monkeypatch.setenv("SIGNALPIPE_LOCAL", "0")
+    config._load()
+    assert config.ENGINE == "api"
+    fake = tmp_path / "claude"
+    fake.write_text(f"""#!{sys.executable}
+import json, sys
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True, "authMethod": "console_api_key", "apiProvider": "firstParty"}})); sys.exit()
+raise SystemExit("must not run an agent on an API account")
+""")
+    fake.chmod(0o755)
+    monkeypatch.setattr(claude_code, "binary", lambda: str(fake))
+    st = run(claude_code.auth_status(fresh=True))
+    assert st == {"installed": True, "signed_in": True, "subscription": False, "method": "console_api_key"}
+    res = run(claude_code.run(system="s", prompt="p"))
+    assert not res["ok"] and "API account" in res["error"]
+    monkeypatch.setattr(claude_code, "_auth_cache", (0.0, {}))

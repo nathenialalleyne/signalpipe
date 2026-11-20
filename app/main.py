@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 
 from . import brain as brain_mod
-from . import config, db, enrich, insights, li_agent, linkedin, llm, local_agent, mailsetup, outreach, pipeline, scoring, seo, validate, web
+from . import (actions, agentkit, claude_code, config, content, copilot, db, enrich, insights, li_agent, linkedin, llm, local_agent,
+               mailsetup, outreach, pipeline, reengage, research, review, scoring, seo, validate, web)
 from .collectors import SOURCE_INFO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -45,6 +46,10 @@ async def scheduler() -> None:
                 await outreach.poll_replies()
             if tick % 45 == 0:
                 await linkedin.sync()
+            if tick % 60 == 0 and llm.available() and review.due() and agentkit.is_on("strategist"):
+                await review.run()
+            if tick % 30 == 0:
+                await reengage.run_queue()
             if tick % 15 == 0:
                 due = db.q("SELECT id FROM plays WHERE status='active' AND (last_run_at IS NULL OR last_run_at < ?)",
                            (db.now() - config.RUN_INTERVAL_HOURS * 3600,))
@@ -167,7 +172,9 @@ async def auth_check():
 async def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM leads GROUP BY status")}
     return {
-        "config": config.status(), "linkedin": {**linkedin.state(), "local_agent": local_agent.status()}, "llm_error": llm.last_error, "send_mode": db.get_setting("send_mode", "copilot"),
+        "config": config.status(), "linkedin": {**linkedin.state(), "local_agent": local_agent.status()},
+        "usage": llm.usage_this_month(), "llm_error": llm.last_error,
+        "claude_code": await claude_code.auth_status() if config.ENGINE == "claude_code" else None, "send_mode": db.get_setting("send_mode", "copilot"),
         "brain_ready": bool(brain_mod.get().get("one_liner")), "leads": counts,
         "plays": db.one("SELECT COUNT(*) n FROM plays")["n"],
         "signals_7d": db.one("SELECT COUNT(*) n FROM signals WHERE created_at>?", (db.now() - 7 * 86400,))["n"],
@@ -337,21 +344,113 @@ async def get_lead(lid: int):
 
 @app.post("/api/leads/{lid}/approve", dependencies=[api])
 async def approve(lid: int, body: dict = Body(default={})):
-    lead = db.one("SELECT * FROM leads WHERE id=?", (lid,))
-    if not lead:
+    res = await actions.approve_lead(lid, body.get("note"), body.get("channels"))
+    if res.get("error"):
         raise HTTPException(404)
-    if not lead["enriched_at"]:
-        await enrich.enrich_lead(lid)
-    db.x("UPDATE leads SET status='approved', note=COALESCE(?,note), updated_at=? WHERE id=?", (body.get("note"), db.now(), lid))
-    res = await outreach.draft_sequence(lid, body.get("channels"))
-    return {"lead": _lead_full(db.one("SELECT * FROM leads WHERE id=?", (lid,))), "sequence": res}
+    return {"lead": _lead_full(db.one("SELECT * FROM leads WHERE id=?", (lid,))), **res}
+
+
+@app.post("/api/leads/{lid}/research", dependencies=[api])
+async def research_lead(lid: int):
+    if not db.one("SELECT 1 FROM leads WHERE id=?", (lid,)):
+        raise HTTPException(404)
+    res = await research.research_lead(lid, force=True)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return {"result": res, "lead": _lead_full(db.one("SELECT * FROM leads WHERE id=?", (lid,)))}
+
+
+@app.get("/api/review", dependencies=[api])
+async def get_review():
+    return review.state()
+
+
+@app.post("/api/review/run", dependencies=[api])
+async def run_review():
+    res = await review.run(force=True)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return review.state()
+
+
+@app.post("/api/review/{sid}/{action}", dependencies=[api])
+async def decide_review(sid: str, action: str):
+    if action not in ("apply", "dismiss"):
+        raise HTTPException(404)
+    res = review.decide(sid, action == "apply")
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return review.state()
 
 
 @app.post("/api/leads/{lid}/reject", dependencies=[api])
 async def reject(lid: int, body: dict = Body(default={})):
-    outreach.stop_sequence(lid, "lead rejected")
-    db.x("UPDATE leads SET status='rejected', note=COALESCE(?,note), updated_at=? WHERE id=?", (body.get("note"), db.now(), lid))
-    return {"ok": True}
+    return actions.reject_lead(lid, body.get("note"))
+
+
+# ---------- agents ----------
+
+@app.get("/api/agents", dependencies=[api])
+async def agents_overview():
+    return {**agentkit.overview(), "engine": config.ENGINE, "claude_code": config.status()["claude_code"],
+            "faq_open": sum(1 for f in brain_mod.get().get("faq", []) if not f.get("a"))}
+
+
+@app.get("/api/agents/runs/{rid}", dependencies=[api])
+async def agent_run(rid: int):
+    r = db.one("SELECT * FROM agent_runs WHERE id=?", (rid,))
+    if not r:
+        raise HTTPException(404)
+    return r
+
+
+@app.post("/api/agents/{name}", dependencies=[api])
+async def agent_toggle(name: str, body: dict = Body(...)):
+    if name not in agentkit.AGENTS:
+        raise HTTPException(404)
+    agentkit.set_on(name, bool(body.get("on")))
+    return agentkit.overview()
+
+
+@app.post("/api/claude-code/check", dependencies=[api])
+async def claude_code_check():
+    return await claude_code.auth_status(fresh=True)
+
+
+@app.get("/api/copilot", dependencies=[api])
+async def copilot_log():
+    return {"log": copilot.transcript()}
+
+
+@app.post("/api/copilot", dependencies=[api])
+async def copilot_ask(body: dict = Body(...)):
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Say something first")
+    res = await copilot.ask(text[:4000])
+    return {**res, "log": copilot.transcript()}
+
+
+@app.post("/api/copilot/reset", dependencies=[api])
+async def copilot_reset():
+    copilot.reset()
+    return {"log": []}
+
+
+@app.post("/api/brain/faq", dependencies=[api])
+async def answer_faq(body: dict = Body(...)):
+    """Answer (or remove) a question the Inbox agent asked."""
+    q, a = (body.get("q") or "").strip(), (body.get("a") or "").strip()
+    faq = brain_mod.get().get("faq", [])
+    if body.get("remove"):
+        faq = [f for f in faq if f["q"] != q]
+    else:
+        found = next((f for f in faq if f["q"] == q), None)
+        if found:
+            found["a"] = a[:1000]
+        elif q:
+            faq.append({"q": q[:300], "a": a[:1000]})
+    return brain_mod.save({"faq": faq[-40:]})
 
 
 @app.post("/api/leads/{lid}/status", dependencies=[api])
@@ -595,7 +694,17 @@ async def put_connections(body: dict = Body(...)):
         v = str(body[k] or "").strip()
         if k in config.SECRETS and not v:
             continue
-        if k in ("SMTP_PORT", "IMAP_PORT", "EMAIL_DAILY_CAP", "LINKEDIN_DAILY_CAP") and v and not v.isdigit():
+        if k == "SIGNALPIPE_MODEL" and v and v not in config.MODELS:
+            raise HTTPException(400, "Unknown model")
+        if k == "SIGNALPIPE_ENGINE" and v and v not in config.ENGINES:
+            raise HTTPException(400, "Unknown engine")
+        if k == "AGENT_BUDGET_USD" and v:
+            try:
+                if float(v) < 0:
+                    raise ValueError
+            except ValueError:
+                raise HTTPException(400, "The monthly budget must be a number of dollars, or 0 for no cap")
+        if k in ("SMTP_PORT", "IMAP_PORT", "EMAIL_DAILY_CAP", "LINKEDIN_DAILY_CAP", "RESEARCH_PER_RUN") and v and not v.isdigit():
             raise HTTPException(400, f"{k} must be a number")
         saved[k] = v
     for k in body.get("clear") or []:
@@ -695,6 +804,22 @@ async def seo_audit(body: dict = Body(default={})):
         return await seo.audit(url, max_pages=max(5, min(int(body.get("max_pages") or 30), 80)))
     except Exception as e:
         raise HTTPException(400, f"Audit failed: {type(e).__name__}: {e}")
+
+
+@app.post("/api/seo/draft", dependencies=[api])
+async def seo_draft(body: dict = Body(...)):
+    brief = body.get("brief") or {}
+    if not brief.get("title"):
+        raise HTTPException(400, "Pick a brief to write")
+    res = await content.write(brief)
+    if res.get("error"):
+        raise HTTPException(400, res["error"])
+    return res
+
+
+@app.get("/api/seo/drafts", dependencies=[api])
+async def seo_drafts():
+    return db.get_setting("content_drafts", {}) or {}
 
 
 @app.get("/api/seo/latest", dependencies=[api])

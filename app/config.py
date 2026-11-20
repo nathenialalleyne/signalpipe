@@ -19,8 +19,12 @@ EDITABLE = (
     "ANTHROPIC_API_KEY", "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_FROM", "SMTP_FROM_NAME",
     "SMTP_SECURITY", "IMAP_HOST", "IMAP_PORT", "IMAP_USER", "IMAP_PASS", "POSTAL_ADDRESS", "EMAIL_DAILY_CAP",
     "HUNTER_API_KEY", "LINKEDIN_DAILY_CAP", "LINKEDIN_EMAIL", "LINKEDIN_PASSWORD", "LINKEDIN_TZ",
+    "SIGNALPIPE_MODEL", "RESEARCH_PER_RUN", "AGENT_BUDGET_USD", "SIGNALPIPE_ENGINE", "CLAUDE_CODE_OAUTH_TOKEN",
 )
-SECRETS = frozenset({"ANTHROPIC_API_KEY", "SMTP_PASS", "IMAP_PASS", "HUNTER_API_KEY", "LINKEDIN_PASSWORD"})
+MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
+ENGINES = ("api", "claude_code")  # an Anthropic API key, or Claude Code signed in to your Claude subscription
+SECRETS = frozenset({"ANTHROPIC_API_KEY", "SMTP_PASS", "IMAP_PASS", "HUNTER_API_KEY", "LINKEDIN_PASSWORD",
+                     "CLAUDE_CODE_OAUTH_TOKEN"})
 
 
 def _load() -> None:
@@ -37,6 +41,9 @@ def _load() -> None:
     # Claude. The Anthropic SDK reads ANTHROPIC_API_KEY itself.
     g["LLM_MODEL"] = env("SIGNALPIPE_MODEL", "claude-opus-5-5")
     g["LLM_ENABLED"] = env("SIGNALPIPE_LLM", "1") != "0"
+    # On your own computer Claude runs on your subscription through Claude Code unless you choose an API key.
+    default_engine = "claude_code" if g["LOCAL"] else "api"
+    g["ENGINE"] = env("SIGNALPIPE_ENGINE", default_engine) if env("SIGNALPIPE_ENGINE", default_engine) in ENGINES else default_engine
     g["USER_AGENT"] = env("SIGNALPIPE_USER_AGENT", "signalpipe/1.0 (+lead research; respects robots.txt)")
 
     # Outbound email, through your own mailbox.
@@ -66,6 +73,11 @@ def _load() -> None:
     # Pacing.
     g["RUN_INTERVAL_HOURS"] = _int("RUN_INTERVAL_HOURS", 12)
     g["ENRICH_PER_RUN"] = _int("ENRICH_PER_RUN", 40)
+    g["RESEARCH_PER_RUN"] = _int("RESEARCH_PER_RUN", 5)
+    try:  # monthly cap on estimated Claude spend; every AI feature pauses when it is reached (0 means no cap)
+        g["AGENT_BUDGET_USD"] = float(env("AGENT_BUDGET_USD", "20") or 20)
+    except ValueError:
+        g["AGENT_BUDGET_USD"] = 20.0
     g["LINKEDIN_DAILY_CAP"] = _int("LINKEDIN_DAILY_CAP", 20)
     g["DEFAULT_REGION"] = env("DEFAULT_PHONE_REGION", "US")
 
@@ -89,9 +101,15 @@ def apply(saved: dict) -> None:
 
 def status() -> dict:
     """What is configured, without leaking any secret values."""
+    from . import claude_code
+    api_key = bool(env("ANTHROPIC_API_KEY") or env("ANTHROPIC_AUTH_TOKEN"))
     return {
-        "llm": bool(LLM_ENABLED and (env("ANTHROPIC_API_KEY") or env("ANTHROPIC_AUTH_TOKEN"))),
+        "llm": bool(LLM_ENABLED and (claude_code.installed() if ENGINE == "claude_code" else api_key)),
         "llm_model": LLM_MODEL,
+        "engine": ENGINE,
+        "api_key": api_key,
+        "claude_code": claude_code.installed(),
+        "agent_budget_usd": AGENT_BUDGET_USD,
         "smtp": bool(SMTP_HOST and SMTP_FROM),
         "imap": bool(IMAP_HOST and IMAP_USER),
         "hunter": bool(HUNTER_API_KEY),
@@ -103,5 +121,6 @@ def status() -> dict:
         "email_daily_cap": EMAIL_DAILY_CAP,
         "linkedin_daily_cap": LINKEDIN_DAILY_CAP,
         "run_interval_hours": RUN_INTERVAL_HOURS,
+        "research_per_run": RESEARCH_PER_RUN,
         "postal_address": bool(POSTAL_ADDRESS),
     }

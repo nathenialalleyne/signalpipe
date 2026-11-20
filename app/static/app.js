@@ -28,7 +28,7 @@ async function api(path, opts = {}) {
 const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { if (e.message !== 'Sign in required') toast(e.message); } };
 
 /* ---------- small renderers ---------- */
-const SIG = { hiring: ['Hiring', 'clay'], funding: ['Funding', 'mint'], competitor_mention: ['Competitor mention', 'lilac'], competitor_engagement: ['Competitor engagement', 'lilac'], keyword_intent: ['Asked in public', 'sky'], keyword_post: ['Posted about it', 'sky'], repo_star: ['Starred a repo', 'peri'], launch: ['Launch', 'peri'], import: ['Imported', ''] };
+const SIG = { agent_found: ['Found by agent', 'mint'], hiring: ['Hiring', 'clay'], funding: ['Funding', 'mint'], competitor_mention: ['Competitor mention', 'lilac'], competitor_engagement: ['Competitor engagement', 'lilac'], keyword_intent: ['Asked in public', 'sky'], keyword_post: ['Posted about it', 'sky'], repo_star: ['Starred a repo', 'peri'], launch: ['Launch', 'peri'], import: ['Imported', ''] };
 const sigPill = (t) => { const [l, c] = SIG[t] || [t || 'Signal', '']; return `<span class="pill ${c}">${esc(l)}</span>`; };
 const scoreBox = (raw) => { const n = Math.round(raw); const c = n >= 65 ? 'hi' : n >= 45 ? 'mid' : 'lo'; const w = n >= 65 ? 'Strong' : n >= 45 ? 'Fair' : 'Weak'; return `<div class="score ${c}"><b>${n}</b><span>${w}</span></div>`; };
 const emailPill = (st, detail) => {
@@ -49,7 +49,7 @@ const phonePill = (d) => {
 const empty = (title, body, action = '') => `<div class="empty col" style="align-items:center"><h3>${esc(title)}</h3><p>${esc(body)}</p>${action}</div>`;
 
 /* ---------- frame ---------- */
-const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['insights', 'Insights'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
+const NAV = [['today', 'Today'], ['leads', 'Leads'], ['outreach', 'Outreach'], ['inbox', 'Inbox'], ['agents', 'Agents'], ['insights', 'Insights'], ['seo', 'SEO'], ['plays', 'Plays'], ['brain', 'Brain'], ['settings', 'Settings']];
 function frame(inner) {
   const st = S.status || { leads: {}, config: {}, linkedin: {} };
   const counts = { leads: st.leads?.new || '', inbox: st.unhandled_replies || '' };
@@ -90,7 +90,7 @@ async function viewToday() {
   const steps = [
     [st.brain_ready, 'Teach it your business', 'Enter your website so it learns what you sell and who buys.', '#/brain'],
     [st.plays > 0, 'Create a play', 'A play is a standing search for one kind of buyer.', '#/plays'],
-    [c.llm, 'Add a Claude API key', 'Without it, scoring is keyword matching and messages are plain templates.', '#/settings'],
+    [c.llm && (c.engine !== 'claude_code' || st.claude_code?.subscription !== false && st.claude_code?.signed_in !== false), 'Connect your Claude subscription', 'Install Claude Code and sign in with your Claude account. Without it there are no agents, scoring is keyword matching and messages are templates.', '#/settings'],
     [c.smtp, 'Connect your mailbox', 'Emails go out from your own address.', '#/settings'],
     [st.linkedin?.enabled, 'Connect LinkedIn', 'Optional. Without it you send LinkedIn steps by hand from a queue.', '#/settings'],
   ];
@@ -125,6 +125,14 @@ async function viewLeads() {
   <aside class="b" id="detail" aria-label="Lead detail"></aside></div>`);
   if (S.leadId) loadLead(S.leadId);
 }
+const researchPanel = (l) => {
+  const r = l.research;
+  if (!r) return '';
+  return `<div class="col" style="gap:8px"><div class="eyebrow">What the People finder learned</div>${r.summary ? `<p class="small">${esc(r.summary)}</p>` : ''}
+    ${(r.hooks || []).length ? `<ul class="clean small" style="gap:4px">${r.hooks.map((h) => `<li><span class="pill sky">Hook</span> ${esc(h)}</li>`).join('')}</ul>` : ''}
+    ${(r.people || []).map((p) => `<div class="small"><b style="font-weight:600">${esc(p.name)}</b> <span class="soft">${esc(p.title || '')}</span>${p.why ? `<div class="soft">${esc(p.why)}</div>` : ''}${(p.evidence || []).length ? `<div>${p.evidence.slice(0, 3).map((u, i) => `<a href="${href(u)}" target="_blank" rel="noopener noreferrer">source ${i + 1}</a>`).join(' · ')}</div>` : ''}</div>`).join('')}
+    ${r.at ? `<span class="small soft">Researched ${ago(r.at)}</span>` : ''}</div>`;
+};
 async function loadLead(id) {
   const l = await api('/leads/' + id);
   S.lead = l;
@@ -139,7 +147,8 @@ async function loadLead(id) {
     ${r.length ? `<div class="note"><ul class="clean" style="gap:4px">${r.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
     ${(l.tech || []).length ? `<div class="row" style="gap:6px">${l.tech.slice(0, 10).map((t) => `<span class="pill">${esc(t)}</span>`).join('')}</div>` : ''}
     <div class="col" style="gap:8px"><div class="eyebrow">Signals</div>${l.signals.map((s) => `<div class="small">${sigPill(s.type)} <a href="${href(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a> <span class="soft">${ago(s.occurred_at)}</span>${s.text ? `<div class="soft" style="margin-top:2px">${esc(s.text.slice(0, 220))}</div>` : ''}</div>`).join('')}</div>
-    <div class="col" style="gap:8px"><div class="row between"><div class="eyebrow">Contacts</div><button class="btn sm" data-act="addContact">Add contact</button></div>
+    ${researchPanel(l)}
+    <div class="col" style="gap:8px"><div class="row between"><div class="eyebrow">Contacts</div><span class="row" style="gap:6px"><button class="btn sm" data-act="research" data-id="${l.id}">${l.research ? 'Find people again' : 'Find people'}</button><button class="btn sm" data-act="addContact">Add contact</button></span></div>
     ${l.contacts.map((c) => `<div class="contact"><div class="row between"><b style="font-weight:600">${esc(c.name || c.title || 'Contact')}${c.is_primary ? ' <span class="pill peri">Primary</span>' : ''}</b><span class="small soft">${esc(c.name ? c.title || '' : '')}</span></div>
       ${c.email ? `<div class="row" style="gap:8px"><span class="mono">${esc(c.email)}</span>${emailPill(c.email_status, c.email_detail)}</div>` : ''}
       ${c.phone ? `<div class="row" style="gap:8px"><a class="mono" href="${href('tel:' + c.phone)}">${esc(c.phone_detail?.display || c.phone)}</a>${phonePill(c.phone_detail)}</div>` : ''}
@@ -196,7 +205,11 @@ async function viewInbox() {
 
 /* ---------- insights ---------- */
 async function viewInsights() {
-  const [plays, r] = await Promise.all([api('/plays'), api('/insights' + (S.insightPlay ? `?play_id=${S.insightPlay}` : ''))]);
+  const [plays, r, rv] = await Promise.all([api('/plays'), api('/insights' + (S.insightPlay ? `?play_id=${S.insightPlay}` : '')), api('/review')]);
+  const KIND = { add_keyword: 'Add keyword', remove_keyword: 'Remove keyword', add_competitor: 'Add competitor', remove_competitor: 'Remove competitor', add_hiring_title: 'Add hiring signal', remove_hiring_title: 'Remove hiring signal', add_buyer_title: 'Add buyer title', remove_buyer_title: 'Remove buyer title', add_disqualifier: 'Add disqualifier', messaging_note: 'Messaging' };
+  const pname = (id) => (plays.find((p) => p.id === id) || {}).name || '';
+  const strategist = `<section class="card lg col"><div class="row between"><div><h2>Strategist</h2><p class="small soft">${rv.at ? `Last review ${ago(rv.at)}. It reviews again each week.` : rv.enough_data ? 'Reviews your results each week and proposes changes.' : 'Starts once about a dozen leads have been reviewed or contacted.'}</p></div>${rv.llm ? `<button class="btn" data-act="reviewRun">Review now</button>` : ''}</div>
+    ${rv.suggestions.length ? `<div class="col" style="gap:10px">${rv.suggestions.map((s) => `<div class="agent"><div class="row between"><span class="row" style="gap:8px"><span class="pill lilac">${esc(KIND[s.kind] || s.kind)}</span><b style="font-weight:600">${esc(s.value)}</b>${s.play_id && pname(s.play_id) ? `<span class="small soft">in ${esc(pname(s.play_id))}</span>` : ''}</span><span class="row" style="gap:6px"><button class="btn sm softp" data-act="reviewDo" data-do="apply" data-id="${s.id}">Apply</button><button class="btn sm" data-act="reviewDo" data-do="dismiss" data-id="${s.id}">Dismiss</button></span></div><span class="small soft">${esc(s.why)}</span></div>`).join('')}</div>` : `<p class="small soft">${rv.at ? 'No open suggestions.' : ''}</p>`}</section>`;
   const f = r.funnel;
   const pct = (v) => (v === null || v === undefined ? 'n/a' : v + '%');
   const table = (title, note, rows) => `<section class="card lg col"><div><h2>${title}</h2><p class="small soft">${note}</p></div>
@@ -205,6 +218,7 @@ async function viewInsights() {
   frame(`${head('What is working', 'Insights', `<select class="i" style="width:auto" data-change="insightPlay" aria-label="Play"><option value="0">All plays</option>${plays.map((p) => `<option value="${p.id}" ${S.insightPlay == p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`)}
   <div class="stats">${[['Found', f.found, 'All leads'], ['Approved', pct(f.approval_rate), `${f.approved} of ${f.reviewed} reviewed`], ['Contacted', f.contacted, 'At least one step sent'], ['Replied', pct(f.reply_rate), `${f.replied} replies`], ['Interested', f.positive, 'Positive replies'], ['Won', f.won, 'Meetings booked']].map(([l, v, n]) => `<div class="card stat"><div class="small soft">${l}</div><div class="v">${v}</div><div class="small soft">${esc(n)}</div></div>`).join('')}</div>
   ${r.findings.length ? `<section class="note col" style="gap:6px"><b style="font-weight:600">What the numbers say</b><ul class="clean" style="gap:4px">${r.findings.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></section>` : `<p class="small soft">${r.enough_data ? 'No clear differences between groups yet.' : `Conclusions appear once about ${r.min_judge * 2} leads have been contacted; until then treat the rates below as noise.`}</p>`}
+  ${strategist}
   ${table('By opening', 'Each approved lead is given one of four opening angles. Angles that earn replies are used more often automatically; the others keep getting a small share so they can prove themselves.', r.tables.angle)}
   <div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(min(560px,100%),1fr))">${table('By signal', 'Which kind of trigger produces buyers.', r.tables.signal)}${table('By buyer level', 'Who actually answers.', r.tables.title)}
   ${table('By score', 'If high scores do not reply more, the scoring needs your reject notes.', r.tables.score)}${table('By channel', 'Which mix of channels each lead received.', r.tables.channel)}</div>`);
@@ -212,8 +226,11 @@ async function viewInsights() {
 
 /* ---------- seo ---------- */
 async function viewSeo() {
-  const d = await api('/seo/latest');
+  const [d, drafts, st] = await Promise.all([api('/seo/latest'), api('/seo/drafts'), api('/status')]);
+  S.status = st;
   const r = d.latest;
+  S.seoPlan = r?.content_plan || [];
+  S.seoDrafts = drafts;
   const sev = { high: ['High', 'blush'], medium: ['Medium', 'butter'], low: ['Low', 'sky'] };
   const cov = { covered: ['Covered', 'mint'], mentioned: ['Mentioned only', 'butter'], missing: ['No page', 'blush'] };
   const tone = !r ? '' : r.score >= 80 ? 'mint' : r.score >= 55 ? 'butter' : 'blush';
@@ -225,8 +242,14 @@ async function viewSeo() {
   <div class="b col" style="gap:24px;position:static;flex-basis:480px;flex-grow:3">
     <section class="card lg col"><h2>What buyers search for</h2>${r.coverage.length ? `<div class="scroll"><table class="t"><thead><tr><th>Phrase</th><th>Coverage</th><th>Page</th></tr></thead><tbody>${r.coverage.map((k) => `<tr><td style="font-weight:500">${esc(k.keyword)}</td><td><span class="pill ${cov[k.status][1]}">${cov[k.status][0]}</span></td><td class="mono soft">${k.pages[0] ? esc(k.pages[0].replace(r.url, '') || '/') : 'Write one'}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small soft">Build the Brain first so there are target phrases to check against.</p>'}</section>
     <section class="col"><div class="row between"><h2>Pages worth writing</h2><span class="small soft">${r.plan_source === 'claude' ? 'Planned by Claude from your gaps and prospect questions' : 'Template plan. Add a Claude key for briefs written from prospect questions.'}</span></div>
-      <div class="grid2">${r.content_plan.map((b) => `<article class="card col" style="gap:8px"><span class="pill lilac" style="align-self:flex-start">${esc(b.intent.replace('_', ' '))}</span><h3>${esc(b.title)}</h3><div class="mono soft">${esc(b.target_keyword)}</div><p class="small soft">${esc(b.why)}</p><details class="small"><summary style="cursor:pointer">Outline</summary><ul style="margin:8px 0 0;padding-left:18px">${b.outline.map((o) => `<li>${esc(o)}</li>`).join('')}</ul></details></article>`).join('')}</div></section></div></div>`}`);
+      <div class="grid2">${r.content_plan.map((b, i) => `<article class="card col" style="gap:8px"><span class="pill lilac" style="align-self:flex-start">${esc(b.intent.replace('_', ' '))}</span><h3>${esc(b.title)}</h3><div class="mono soft">${esc(b.target_keyword)}</div><p class="small soft">${esc(b.why)}</p><details class="small"><summary style="cursor:pointer">Outline</summary><ul style="margin:8px 0 0;padding-left:18px">${b.outline.map((o) => `<li>${esc(o)}</li>`).join('')}</ul></details>${draftBox(b, i, st)}</article>`).join('')}</div></section></div></div>`}`);
 }
+
+const draftBox = (b, i, st) => {
+  const dr = (S.seoDrafts || {})[b.title];
+  if (dr) return `<details class="small"><summary style="cursor:pointer"><span class="pill mint">Draft ready</span> ${esc(dr.title)}, ${dr.markdown.split(/\s+/).length} words</summary><p class="soft" style="margin:8px 0">${esc(dr.meta_description)}</p><div class="well" style="max-height:360px;overflow:auto">${esc(dr.markdown)}</div><div class="row" style="gap:8px;margin-top:8px"><button class="btn sm" data-act="copyDraft" data-id="${i}">Copy markdown</button><button class="btn sm" data-act="seoDraft" data-id="${i}">Write again</button></div></details>`;
+  return st.config.llm ? `<button class="btn sm softp" style="align-self:flex-start" data-act="seoDraft" data-id="${i}">Write the draft</button>` : '';
+};
 
 /* ---------- plays ---------- */
 const PLAY_FIELDS = [['keywords', 'Pain keywords', 'What prospects type or say when they have the problem'], ['competitors', 'Competitors', 'Names to watch for in public conversations'], ['hiring_titles', 'Hiring signals', 'Job titles whose ads mean a company needs you'], ['funding_keywords', 'Funding focus', 'Industries to watch for new rounds'], ['watchlist', 'Target accounts', 'Domains whose job boards to watch, one per line'], ['linkedin_watch', 'LinkedIn pages to watch', 'Competitor company pages or profiles. Needs LinkedIn connected.'], ['github_repos', 'GitHub repos', 'owner/name, to catch new stargazers']];
@@ -263,8 +286,66 @@ async function viewBrain() {
     <div class="eyebrow">Ideal customer</div><div class="grid2">${ICP_LISTS.map(([k, l]) => t('icp.' + k, l + ', one per line', lines(b.icp[k]), 4)).join('')}</div>
     <div class="eyebrow">Messaging</div><div class="grid2">${BRAIN_LISTS.map(([k, l]) => t(k, l + ', one per line', lines(b[k]), 5)).join('')}</div>
     <div class="eyebrow">Sender</div><div class="grid2"><label class="f">Your name<input class="i" name="sender_name" value="${esc(b.sender_name)}"></label><label class="f">Your title<input class="i" name="sender_title" value="${esc(b.sender_title)}"></label><label class="f">Calendar link<input class="i" name="calendar_link" value="${esc(b.calendar_link)}"></label></div>
-    <div class="row"><button class="btn primary">Save</button></div></form>`);
+    <div class="row"><button class="btn primary">Save</button></div></form>
+  <section class="card lg col"><div><h2>Questions from replies</h2><p class="small soft">When a prospect asks something your profile does not answer, the Inbox agent adds it here instead of guessing. Answer once and every later reply uses it.</p></div>
+    ${(b.faq || []).length ? (b.faq || []).map((f) => `<form class="col" data-form="faq" style="gap:8px"><input type="hidden" name="q" value="${esc(f.q)}"><div class="row between"><b style="font-weight:600">${esc(f.q)}</b>${f.a ? '<span class="pill mint">Answered</span>' : '<span class="pill butter">Needs your answer</span>'}</div><textarea class="i" name="a" rows="2" placeholder="Your answer, in a sentence or two">${esc(f.a || '')}</textarea><div class="row" style="gap:8px"><button class="btn sm">Save answer</button><button type="button" class="btn sm" data-act="faqRemove" data-q="${esc(f.q)}">Remove</button></div></form>`).join('') : '<p class="small soft">None yet.</p>'}
+    <form class="row" data-form="faq" style="align-items:flex-end"><label class="f grow">Add a question yourself<input class="i" name="q" placeholder="Do you integrate with Salesforce?"></label><label class="f grow">Answer<input class="i" name="a"></label><button class="btn">Add</button></form></section>`);
 }
+
+/* ---------- agents ---------- */
+const COPILOT_IDEAS = ['Find 10 companies like my best leads', 'Research the top 5 new leads', 'Why are my replies low?', 'Create a play for fintech startups hiring SDRs'];
+async function viewAgents() {
+  const [st, ov, cp] = await Promise.all([api('/status'), api('/agents'), api('/copilot')]);
+  S.status = st;
+  const u = ov.usage || {}, sub = ov.engine === 'claude_code';
+  const spend = sub ? `On your Claude subscription through Claude Code. ${u.subscription_calls || 0} run${u.subscription_calls === 1 ? '' : 's'} this month; they count toward your plan's usage limits.` : `About $${(u.usd || 0).toFixed(2)} of Claude spend this month${ov.budget ? ` of a $${ov.budget.toFixed(0)} cap` : ', no cap'}, ${u.searches || 0} web searches.`;
+  const chat = cp.log.map((m) => m.role === 'you' ? `<div class="msg you">${esc(m.text)}</div>` : m.role === 'note' ? `<div class="msg sys">${esc(m.text)}</div>` : `<div class="msg bot">${m.error ? '<span class="pill blush">Stopped</span> ' : ''}${esc(m.text)}${(m.steps || []).length ? `<div class="steps">${m.steps.map((t) => `<span class="pill">${esc(t.replace(/_/g, ' '))}</span>`).join('')}</div>` : ''}</div>`).join('');
+  const roster = ov.agents.map((a) => `<div class="agent ${a.on ? '' : 'off'}"><div class="row between"><b style="font-weight:600">${esc(a.label)}</b><label class="switch"><input type="checkbox" data-change="agentOn" data-id="${a.key}" ${a.on ? 'checked' : ''}>${a.on ? 'On' : 'Off'}</label></div>
+    <span class="small soft">${esc(a.what)}</span><span class="small mono soft">${a.runs ? `${a.runs} run${a.runs === 1 ? '' : 's'} this month${a.runs - a.ok ? `, ${a.runs - a.ok} stopped` : ''}${sub ? '' : `, $${(+a.usd).toFixed(2)}`}, last ${ago(a.last)}` : 'No runs this month'}</span></div>`).join('');
+  const LABEL = Object.fromEntries(ov.agents.map((a) => [a.key, a.label]));
+  const runs = ov.runs.map((r) => `<details class="card tight"><summary class="row" style="cursor:pointer;gap:10px;flex-wrap:nowrap"><span class="pill ${r.status === 'ok' ? 'mint' : r.status === 'running' ? 'peri' : 'blush'}">${esc(LABEL[r.agent] || r.agent)}</span><span class="grow small" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.summary || r.subject || '')}</span><span class="small soft mono" style="white-space:nowrap">${ago(r.started_at)}</span></summary>
+    <div class="small soft" style="margin-top:8px">${esc(r.subject || '')}${r.usd ? ` · $${(+r.usd).toFixed(3)}` : ''}${r.searches ? ` · ${r.searches} searches` : ''}${r.finished_at ? ` · ${Math.max(1, Math.round(r.finished_at - r.started_at))}s` : ''}</div>
+    ${(r.steps || []).length ? `<div class="steps-list">${r.steps.map((s) => `<div><span class="pill ${s.error ? 'blush' : ''}">${esc(s.tool.replace(/_/g, ' '))}</span> <code>${esc(s.input || '')}</code>${s.result ? `<div class="soft" style="margin:2px 0 0 8px">${esc(s.result)}</div>` : ''}</div>`).join('')}</div>` : ''}</details>`).join('');
+  frame(`${head(spend, 'Agents', `<button class="btn" data-act="agentRefresh">Refresh</button>`)}
+  ${!ov.llm ? `<div class="card tight"><span class="pill butter">Off</span> Connect your Claude subscription in <a href="#/settings">Settings</a> to start the agents.</div>` : ''}
+  ${ov.faq_open ? `<div class="card tight"><span class="pill butter">${ov.faq_open}</span> The Inbox agent has questions only you can answer. <a href="#/brain">Answer them on the Brain page</a>.</div>` : ''}
+  <div class="split"><section class="a col" aria-label="Copilot"><div class="card lg col"><div class="row between"><h2>Copilot</h2>${cp.log.length ? '<button class="btn sm" data-act="copilotReset">New conversation</button>' : ''}</div>
+    <div class="chat" id="chat">${chat || `<p class="small soft">Ask it to do things in plain words. It uses the same actions as the dashboard and can call the other agents. It never sends messages; that stays in Outreach.</p><div class="row" style="gap:6px">${COPILOT_IDEAS.map((t) => `<button class="btn sm" data-act="copilotSuggest" data-text="${esc(t)}">${esc(t)}</button>`).join('')}</div>`}</div>
+    <form class="col" data-form="copilot" style="gap:8px"><textarea class="i" name="text" rows="2" placeholder="Find 15 logistics companies that raised money this month" aria-label="Message the Copilot" ${ov.llm ? '' : 'disabled'}></textarea><div class="row between"><span class="small soft">Enter to send, Shift+Enter for a new line</span><button class="btn primary" ${ov.llm ? '' : 'disabled'}>Send</button></div></form></div>
+    <section class="col"><h2>Activity</h2>${runs || '<p class="small soft">Every agent run shows up here with each step it took.</p>'}</section></section>
+  <aside class="b col" aria-label="Agents"><section class="card lg col" style="gap:10px"><h2>Your agents</h2>${roster}</section></aside></div>`);
+  const c = document.getElementById('chat'); if (c) c.scrollTop = c.scrollHeight;
+}
+
+const claudeSettings = (c, cn, field, pill, u, cc) => {
+  const sub = c.engine === 'claude_code';
+  cc = cc || {};
+  const state = !c.claude_code ? ['butter', 'Claude Code is not installed yet']
+    : cc.signed_in === false ? ['butter', 'Installed, not signed in']
+    : cc.subscription === false ? ['blush', 'Signed in with an API account, which would bill API usage']
+    : cc.subscription ? ['mint', 'Signed in to your Claude plan'] : ['sky', 'Installed'];
+  const how = !c.claude_code
+    ? `<p class="small">Install it once in a terminal on this computer (in WSL on Windows):</p><div class="well mono">curl -fsSL https://claude.ai/install.sh | bash</div><p class="small">Then run <span class="mono">claude</span>, sign in with your Claude account, and restart Signalpipe.</p>`
+    : cc.signed_in === false ? '<p class="small">Open a terminal, run <span class="mono">claude</span>, and sign in with your Claude account (Pro or Max). Then press Check again.</p>'
+    : cc.subscription === false ? '<p class="small">Run <span class="mono">claude auth logout</span>, then <span class="mono">claude</span>, and sign in with your Claude account instead of a Console account. Agents will not run until then, so nothing is billed to the API.</p>'
+    : '<p class="small soft">Agents run on your plan and count toward its usage limits, the same ones you share with claude.ai. There is no API bill.</p>';
+  return `<section class="card lg col"><div class="row between"><h2>Claude</h2>${pill(c.llm, sub ? 'On, your subscription' : 'On, API key')}</div>
+    <p class="small soft">Runs the agents, scores leads against your customer profile and writes your messages.</p>
+    ${sub ? `<div class="col" style="gap:10px"><div class="row between"><span class="row" style="gap:8px"><span class="pill ${state[0]}">${esc(state[1])}</span><span class="small soft">through Claude Code on this computer</span></span><button class="btn sm" data-act="ccCheck">Check again</button></div>${how}</div>` : `<p class="small"><span class="pill butter">API key</span> Signalpipe is set to bill an Anthropic API key. Switch to your subscription below.</p>`}
+    <form class="col" data-form="conn" style="gap:14px">
+      <div class="grid2"><label class="f">Model<select class="i" name="SIGNALPIPE_MODEL">${[['claude-opus-5-5', 'Opus 5.5, best results'], ['claude-sonnet-5-5', 'Sonnet 5.5, lighter on your limits'], ['claude-haiku-5-5', 'Haiku 5.5, lightest, weaker research']].map(([v, l]) => `<option value="${v}" ${(cn.SIGNALPIPE_MODEL || 'claude-opus-5-5') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        ${field('RESEARCH_PER_RUN', 'Leads the People finder researches per play run', { type: 'number', ph: '5' })}</div>
+      ${sub ? '<input type="hidden" name="SIGNALPIPE_ENGINE" value="claude_code">' : ''}
+      <details ${sub ? '' : 'open'}><summary class="small" style="cursor:pointer">${sub ? 'Use a paid API key instead (not recommended for you)' : 'How Signalpipe reaches Claude'}</summary>
+        <div class="col" style="gap:12px;margin-top:12px">
+          <div class="row" style="gap:12px;align-items:stretch">
+            <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="claude_code" ${sub ? 'checked' : ''}><span class="col" style="gap:4px"><b style="font-weight:600">My Claude subscription</b><span class="small soft">Through Claude Code on this computer. No API bill.</span></span></label>
+            <label class="choice"><input type="radio" name="SIGNALPIPE_ENGINE" value="api" ${sub ? '' : 'checked'}><span class="col" style="gap:4px"><b style="font-weight:600">An API key</b><span class="small soft">Billed per use by the Claude Console.</span></span></label></div>
+          <div class="grid2">${field('ANTHROPIC_API_KEY', 'API key', { secret: true, ph: 'sk-ant-...' })}${field('AGENT_BUDGET_USD', 'Monthly cap on API spend, dollars (0 for none)', { type: 'number', ph: '20', attrs: 'step="1" min="0"' })}</div>
+          ${!sub && u.usd ? `<p class="small soft">About $${u.usd.toFixed(2)} of API spend this month.</p>` : ''}
+          <details><summary class="small" style="cursor:pointer">Subscription on a server</summary><p class="small soft" style="margin:8px 0">Run <span class="mono">claude setup-token</span> where you are signed in and paste the token here.</p>${field('CLAUDE_CODE_OAUTH_TOKEN', 'Claude Code token', { secret: true })}</details></div></details>
+      <div class="row"><button class="btn primary">Save</button></div></form></section>`;
+};
 
 /* ---------- settings ---------- */
 async function viewSettings() {
@@ -287,9 +368,7 @@ async function viewSettings() {
     : li.via === 'provider' ? `<p class="small"><span class="pill mint">Connected</span> ${li.account ? 'Signed in as ' + esc(li.account) + '. ' : ''}${li.sent_this_week} of ${li.weekly_cap} invites used this week.</p>`
     : `<p class="small soft">Not connected, so LinkedIn steps wait in a queue for you to send by hand. See the README for running the LinkedIn agent with a server deployment.</p>`;
   frame(`${head(c.local ? 'Saved on this computer only' : 'Saved here; these take precedence over environment variables', 'Settings')}
-  <section class="card lg col"><div class="row between"><h2>Claude</h2>${pill(c.llm)}</div>
-    <p class="small soft">Scores leads against your customer profile and writes your messages. Without a key, scoring is keyword matching and messages are plain templates. Create a key in the Claude Console under API keys.</p>
-    <form class="row" data-form="conn" style="align-items:flex-end">${field('ANTHROPIC_API_KEY', 'API key', { secret: true, ph: 'sk-ant-...', cls: 'grow' })}<button class="btn primary">Save</button></form></section>
+  ${claudeSettings(c, cn, field, pill, st.usage || {}, st.claude_code)}
 
   <section class="card lg col"><div class="row between"><h2>Email</h2><span class="row" style="gap:6px">${pill(c.smtp, 'Sending on', 'Sending off')}${pill(c.imap, 'Replies on', 'Replies off')}</span></div>
     <p class="small soft">Emails go out from your own mailbox, and replies are read from it so a sequence stops when someone answers.</p>
@@ -329,7 +408,7 @@ async function viewSettings() {
 }
 
 /* ---------- router ---------- */
-const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, insights: viewInsights, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
+const VIEWS = { today: viewToday, leads: viewLeads, outreach: viewOutreach, inbox: viewInbox, agents: viewAgents, insights: viewInsights, seo: viewSeo, plays: viewPlays, brain: viewBrain, settings: viewSettings };
 const render = guard(async () => {
   const name = (location.hash.replace(/^#\//, '').split('?')[0]) || 'today';
   S.view = VIEWS[name] ? name : 'today';
@@ -347,7 +426,17 @@ const saveField = async (id) => {
 const A = {
   pick: async (id) => { S.leadId = +id; root.querySelectorAll('.lead').forEach((b) => b.classList.toggle('sel', +b.dataset.id === S.leadId)); await loadLead(S.leadId); },
   leadTab: (id) => { S.leadTab = id; S.leadId = null; return render(); },
-  approve: async (id, btn) => { btn.disabled = true; btn.textContent = 'Drafting'; const r = await api(`/leads/${id}/approve`, { method: 'POST', body: {} }); toast(`Approved. Drafted ${(r.sequence.created || []).length} steps${r.sequence.source === 'template' ? ' from templates' : ''}.`); S.leadId = null; return render(); },
+  approve: async (id, btn) => { btn.disabled = true; btn.textContent = S.status?.config?.llm ? 'Finding people and drafting, about a minute' : 'Drafting'; const r = await api(`/leads/${id}/approve`, { method: 'POST', body: {} }); const ppl = r.research && !r.research.error ? `Found ${r.research.people} people. ` : ''; toast(`${ppl}Approved. Drafted ${(r.sequence.created || []).length} steps${r.sequence.source === 'template' ? ' from templates' : r.sequence.source === 'writer agent' ? ' with the Writer' : ''}.`); S.leadId = null; return render(); },
+  research: async (id, btn) => { btn.disabled = true; btn.textContent = 'Searching, about a minute'; const r = await api(`/leads/${id}/research`, { method: 'POST' }); toast(`Found ${r.result.people} people, ${r.result.added} new, using ${r.result.searches} searches.`); return loadLead(id); },
+  agentRefresh: () => render(),
+  ccCheck: async (_, btn) => { btn.disabled = true; const r = await api('/claude-code/check', { method: 'POST' }); toast(r.subscription ? 'Signed in to your Claude plan.' : r.signed_in === false ? 'Not signed in yet.' : r.installed ? 'Checked.' : 'Claude Code is not installed.'); return render(); },
+  copilotReset: async () => { if (!confirm('Start a new conversation? The Copilot forgets this one.')) return; await api('/copilot/reset', { method: 'POST' }); return render(); },
+  copilotSuggest: async (_, btn) => { const i = root.querySelector('[data-form="copilot"] textarea'); if (i) { i.value = btn.dataset.text; i.focus(); } },
+  seoDraft: async (id, btn) => { const b = (S.seoPlan || [])[+id]; if (!b) return; btn.disabled = true; btn.textContent = 'Researching and writing, a few minutes'; await api('/seo/draft', { method: 'POST', body: { brief: b } }); toast('Draft written.'); return render(); },
+  copyDraft: async (id) => { const d = (S.seoDrafts || {})[(S.seoPlan || [])[+id]?.title]; if (!d) return; await navigator.clipboard.writeText(`# ${d.title}\n\n${d.markdown}`); toast('Copied as markdown.'); },
+  faqRemove: async (_, btn) => { await api('/brain/faq', { method: 'POST', body: { q: btn.dataset.q, remove: true } }); return render(); },
+  reviewRun: async (_, btn) => { btn.disabled = true; btn.textContent = 'Reviewing'; const r = await api('/review/run', { method: 'POST' }); toast(r.suggestions.length ? `${r.suggestions.length} suggestions.` : 'No changes suggested this time.'); return render(); },
+  reviewDo: async (id, btn) => { await api(`/review/${id}/${btn.dataset.do}`, { method: 'POST' }); toast(btn.dataset.do === 'apply' ? 'Applied.' : 'Dismissed.'); return render(); },
   reject: async (id) => { await api(`/leads/${id}/reject`, { method: 'POST', body: {} }); S.leadId = null; return render(); },
   enrich: async (id, btn) => { btn.disabled = true; btn.textContent = 'Looking up'; const r = await api(`/leads/${id}/enrich`, { method: 'POST' }); toast(r.result.contacts_added ? `Found ${r.result.contacts_added} more contacts.` : 'Nothing new found.'); return loadLead(id); },
   redraft: async (id, btn) => { btn.disabled = true; await api(`/leads/${id}/redraft`, { method: 'POST' }); toast('Sequence rewritten.'); return loadLead(id); },
@@ -410,10 +499,14 @@ root.addEventListener('change', guard(async (e) => {
     return;
   }
   if (el.dataset.change === 'insightPlay') { S.insightPlay = +el.value; return render(); }
+  if (el.dataset.change === 'agentOn') { await api('/agents/' + el.dataset.id, { method: 'POST', body: { on: el.checked } }); return render(); }
   if (el.dataset.change === 'leadStatus') { await api(`/leads/${S.leadId}/status`, { method: 'POST', body: { status: el.value } }); return render(); }
   if (el.dataset.change === 'outcome' && el.value) { await api('/messages/' + el.dataset.id, { method: 'PUT', body: { ...(await saveField(el.dataset.id)), action: 'done', outcome: el.value } }); return render(); }
   if (el.dataset.change === 'csv' && el.files[0]) { const r = await api(`/plays/${el.dataset.id}/import`, { method: 'POST', raw: await el.files[0].text() }); toast(`Imported ${r.rows} rows, ${r.new_leads} new leads.`); return render(); }
 }));
+root.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && e.target.closest('[data-form="copilot"] textarea')) { e.preventDefault(); e.target.form.requestSubmit(); }
+});
 root.addEventListener('submit', guard(async (e) => {
   const f = e.target.closest('[data-form]');
   if (!f) return;
@@ -438,6 +531,15 @@ root.addEventListener('submit', guard(async (e) => {
     toast('Saved.');
     return render();
   }
+  if (kind === 'copilot') {
+    const text = String(fd.get('text') || '').trim(); if (!text) return;
+    const chat = document.getElementById('chat'), ta = f.querySelector('textarea');
+    if (chat) { if (!chat.querySelector('.msg')) chat.innerHTML = ''; chat.insertAdjacentHTML('beforeend', `<div class="msg you">${esc(text)}</div><div class="msg sys" id="thinking">Working on it. This can take a minute when it searches the web.</div>`); chat.scrollTop = chat.scrollHeight; }
+    ta.value = ''; ta.disabled = true; btn.disabled = true;
+    try { await api('/copilot', { method: 'POST', body: { text } }); } finally { await render(); }
+    return root.querySelector('[data-form="copilot"] textarea')?.focus();
+  }
+  if (kind === 'faq') { if (!String(fd.get('q') || '').trim()) return; await api('/brain/faq', { method: 'POST', body: { q: fd.get('q'), a: fd.get('a') } }); toast('Saved. Replies will use this answer.'); return render(); }
   if (kind === 'suppress') { await api('/suppression', { method: 'POST', body: { value: fd.get('value') } }); return render(); }
   if (kind === 'check') {
     const v = String(fd.get('value')).trim(), out = document.getElementById('checkOut');

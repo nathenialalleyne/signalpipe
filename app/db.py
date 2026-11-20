@@ -74,12 +74,19 @@ CREATE TABLE IF NOT EXISTS seo_audits (
   id INTEGER PRIMARY KEY, url TEXT NOT NULL, created_at REAL NOT NULL, report TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY, agent TEXT NOT NULL, subject TEXT, started_at REAL NOT NULL, finished_at REAL,
+  status TEXT NOT NULL DEFAULT 'running', summary TEXT, usd REAL NOT NULL DEFAULT 0, searches INTEGER NOT NULL DEFAULT 0,
+  steps TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS agent_runs_agent ON agent_runs(agent, started_at);
+
 CREATE TABLE IF NOT EXISTS cache (
   key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at REAL NOT NULL
 );
 """
 
-JSON_COLS = {"config", "extra", "tech", "reasons", "email_detail", "phone_detail", "stats", "report"}
+JSON_COLS = {"config", "extra", "tech", "reasons", "email_detail", "phone_detail", "stats", "report", "research", "steps"}
 
 
 def conn() -> sqlite3.Connection:
@@ -96,6 +103,8 @@ def conn() -> sqlite3.Connection:
             have = {r[1] for r in _conn.execute("PRAGMA table_info(leads)").fetchall()}
             if "variant" not in have:
                 _conn.execute("ALTER TABLE leads ADD COLUMN variant TEXT")
+            if "research" not in have:
+                _conn.execute("ALTER TABLE leads ADD COLUMN research TEXT")
         return _conn
 
 

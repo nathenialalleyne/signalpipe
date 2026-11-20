@@ -65,6 +65,18 @@ def _already_running(port: int | None) -> bool:
         return False
 
 
+def _open(url: str, no_browser: bool) -> None:
+    """Open the signed-in link, and always print it: on WSL or a headless machine no browser opens by itself."""
+    opened = False
+    if not no_browser:
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+    print(f"\n  {'Opened in your browser. If it did not appear, open' if opened else 'Open'} this link to sign in:\n"
+          f"  {url}\n", flush=True)
+
+
 def _free_port(preferred: int) -> int:
     for port in [preferred, *range(preferred + 1, preferred + 40)]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -86,9 +98,8 @@ def main() -> None:
     ident = _identity(home)
     if _already_running(ident.get("port")):
         url = f"http://127.0.0.1:{ident['port']}/api/local-login?key={ident['key']}"
-        print("Signalpipe is already running. Opening it in your browser.")
-        if not args.no_browser:
-            webbrowser.open(url)
+        print("Signalpipe is already running.")
+        _open(url, args.no_browser)
         return
 
     port = _free_port(args.port or 8777)
@@ -109,11 +120,10 @@ def main() -> None:
     def announce() -> None:
         while not server.started:
             time.sleep(0.2)
-        print(f"\n  Signalpipe is running at http://127.0.0.1:{port}\n"
+        print("\n  Signalpipe is running.\n"
               "  Keep this window open while you use it. Close it (or press Ctrl+C) to stop.\n"
-              "  To open it again later, start Signalpipe the same way.\n", flush=True)
-        if not args.no_browser:
-            webbrowser.open(url)
+              "  To open it again later, start Signalpipe the same way.", flush=True)
+        _open(url, args.no_browser)
 
     threading.Thread(target=announce, daemon=True).start()
     server.run()
