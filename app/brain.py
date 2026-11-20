@@ -9,6 +9,8 @@ EMPTY = {
     "icp": {"industries": [], "company_sizes": [], "titles": [], "geos": [], "disqualifiers": []},
     "pains": [], "competitors": [], "keywords": [], "hiring_signals": [], "objections": [],
     "tone": "direct, specific, no hype", "sender_name": "", "sender_title": "", "calendar_link": "",
+    "message_notes": [],  # learned from replies by the weekly review, applied by you
+    "faq": [],  # questions prospects asked that the Inbox agent could not answer, with your answers
 }
 
 SCHEMA = llm.obj({
@@ -123,7 +125,7 @@ def suggested_play(brain: dict) -> dict:
         "hiring_titles": brain.get("hiring_signals", [])[:8],
         "funding_keywords": (brain.get("icp", {}).get("industries") or [])[:6],
         "watchlist": [], "github_repos": [],
-        "sources": ["hn", "jobs", "funding"],
+        "sources": ["agent", "hn", "jobs", "funding"],
         "lookback_days": 14, "min_score": 45,
         "channels": ["email", "linkedin", "phone"],
     }
@@ -145,5 +147,7 @@ def summary(brain: dict, limit: int = 1800) -> str:
         f"Disqualifiers: {', '.join(icp.get('disqualifiers', []))}",
         f"Pains we solve: {'; '.join(brain.get('pains', [])[:6])}",
         f"Competitors: {', '.join(brain.get('competitors', []))}",
+        f"What replies have taught us: {'; '.join(brain.get('message_notes', []))}",
+        f"Answers to questions prospects ask: {' '.join(f['q'] + ' ' + f['a'] for f in brain.get('faq', []) if f.get('a'))}",
     ]
     return "\n".join(l for l in lines if not l.endswith(": "))[:limit]

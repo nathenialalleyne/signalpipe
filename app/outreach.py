@@ -71,6 +71,14 @@ def _context(lead: dict, contact: dict | None, signals: list[dict], brain: dict)
     angle = (lead.get("reasons") or {}).get("angle") if isinstance(lead.get("reasons"), dict) else ""
     if angle:
         lines.append(f"Suggested angle: {angle}")
+    research = lead.get("research") or {}
+    if research.get("summary"):
+        lines.append(f"Researched just now: {research['summary']}")
+    for h in research.get("hooks", []):
+        lines.append(f"Hook worth using (verified, with source): {h}")
+    why = next((p.get("why") for p in research.get("people", []) if c.get("name") and p.get("name") == c.get("name")), "")
+    if why:
+        lines.append(f"Why this person: {why}")
     lines.append("\n# Signals (most recent first)")
     for s in signals[:3]:
         when = time.strftime("%b %d", time.gmtime(s["occurred_at"]))
@@ -147,11 +155,16 @@ async def draft_sequence(lead_id: int, channels: list[str] | None = None, replac
     from . import insights
     angle = insights.pick_angle(lead["play_id"])
     db.x("UPDATE leads SET variant=? WHERE id=?", (angle, lead_id))
-    seq = await llm.ask_json(
-        SEQ_SYSTEM + "\n\n# Opening angle for email 1 and the LinkedIn note (an experiment; follow it)\n" +
-        insights.ANGLES[angle] + "\n\n# Company\n" + brain_mod.summary(brain),
-        _context(lead, contact, signals, brain), SEQ_SCHEMA, effort="medium", max_tokens=6000)
-    source = "claude"
+    seq, source = None, "claude"
+    from . import agentkit, writer
+    if agentkit.is_on("writer") and llm.available():
+        seq = await writer.write(lead, contact, signals, brain, angle)
+        source = "writer agent" if seq else source
+    if not seq:
+        seq = await llm.ask_json(
+            SEQ_SYSTEM + "\n\n# Opening angle for email 1 and the LinkedIn note (an experiment; follow it)\n" +
+            insights.ANGLES[angle] + "\n\n# Company\n" + brain_mod.summary(brain),
+            _context(lead, contact, signals, brain), SEQ_SCHEMA, effort="medium", max_tokens=6000)
     if not seq or len(seq.get("emails", [])) < 1:
         seq, source = _template(lead, contact, signals, brain, angle), "template"
 
@@ -384,7 +397,15 @@ async def record_reply(lead_id: int, contact_id: int | None, from_addr: str, sub
         brain = brain_mod.get()
         sent = db.q("SELECT subject, body FROM messages WHERE lead_id=? AND status IN ('sent','done') AND channel!='call' "
                     "ORDER BY sent_at", (lead_id,))
-        data = await llm.ask_json(
+        from . import agentkit, inbox
+        handled = None
+        if agentkit.is_on("inbox") and llm.available():
+            handled = await inbox.handle(lead, contact, sent, body, from_addr)
+        if handled:
+            kind, draft = "reply:" + handled["intent"], handled["draft"]
+            if handled["actions"]:
+                draft = (draft + "\n\n" if draft else "") + "[Done by the Inbox agent: " + "; ".join(handled["actions"]) + "]"
+        data = None if handled else await llm.ask_json(
             "You help a founder answer replies to their outbound email. Classify the reply's intent, then draft the "
             "founder's answer: short, plain, human, directly responsive to what was asked, with one clear next step. "
             "If they are not interested, the draft is one gracious line. Never invent pricing, features or facts not in "

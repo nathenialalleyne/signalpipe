@@ -42,6 +42,8 @@ def ingest(play_id: int, signals: list[Signal]) -> tuple[int, int, set[int]]:
         lead = db.one("SELECT id FROM leads WHERE play_id=? AND lead_key=?", (play_id, key))
         if lead:
             lead_id = lead["id"]
+            from . import reengage
+            reengage.note_signal(lead_id)  # a contacted lead that went quiet just did something new
         else:
             lead_id = db.x("INSERT INTO leads(play_id,lead_key,company_name,company_domain,created_at,updated_at) "
                            "VALUES(?,?,?,?,?,?)",
@@ -167,6 +169,10 @@ async def run_play(play_id: int, sources: list[str] | None = None) -> dict:
             (",".join(str(i) for i in touched | set(batch)) or "0"), (play_id,))]
         db.x("UPDATE runs SET stats=? WHERE id=?", (db.j({**stats, "stage": "scoring"}), run_id))
         stats["scored"] = await scoring.score_leads(alive)
+        # The people-finding agent researches the best new leads, so the queue shows named buyers.
+        db.x("UPDATE runs SET stats=? WHERE id=?", (db.j({**stats, "stage": "researching"}), run_id))
+        from . import research
+        stats["researched"] = await research.research_top(play_id, config.RESEARCH_PER_RUN, float(cfg.get("min_score") or 45))
         db.x("UPDATE plays SET last_run_at=? WHERE id=?", (db.now(), play_id))
     except Exception as e:
         error = f"{type(e).__name__}: {e}"

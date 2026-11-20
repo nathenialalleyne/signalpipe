@@ -36,7 +36,7 @@ class Signal:
 INTENT_WEIGHT = {
     "competitor_mention": 90, "funding": 75, "hiring": 70, "repo_star": 65,
     "keyword_intent": 60, "launch": 50, "import": 40,
-    "competitor_engagement": 85, "keyword_post": 60,
+    "competitor_engagement": 85, "keyword_post": 60, "agent_found": 70,
 }
 
 
@@ -65,8 +65,9 @@ def matcher(words: list[str]):
 
 def registry() -> dict:
     from . import ats, funding, github, hn, jobs
-    from .. import linkedin
+    from .. import linkedin, prospector
     return {
+        "agent": prospector.collect,
         "linkedin": linkedin.collect,
         "hn": hn.collect,
         "jobs": jobs.collect,
@@ -77,6 +78,7 @@ def registry() -> dict:
 
 
 SOURCE_INFO = {
+    "agent": "Prospector agent: searches the web for companies that fit your profile and show a buying trigger now, plus lookalikes of your best leads. Uses Claude.",
     "linkedin": "LinkedIn (needs a connected provider account): people engaging with the pages and profiles you watch, and authors of posts matching your keywords.",
     "hn": "Hacker News: posts and comments that mention your competitors or pain keywords, plus new launches.",
     "jobs": "Job ads on RemoteOK, Remotive, Arbeitnow and the monthly HN hiring thread that match your hiring-signal titles.",
