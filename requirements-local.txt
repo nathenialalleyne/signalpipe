@@ -1,0 +1,5 @@
+# What the local launchers install. Playwright is here for the Node runtime and browser library it ships,
+# which the LinkedIn agent uses; tzdata supplies time zones on Windows.
+-r requirements.txt
+playwright==1.65.2
+tzdata==2026.6

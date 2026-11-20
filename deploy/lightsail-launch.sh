@@ -1,7 +1,8 @@
 #!/bin/bash
 # Lightsail launch script for Signalpipe. Paste this into "Add launch script" when creating an
-# Ubuntu 24.04 instance. It installs Docker, fetches the app, generates a password and starts it
-# behind Caddy with automatic HTTPS. Takes about five minutes after the instance boots.
+# Ubuntu 24.04 instance (2 GB plan: the LinkedIn agent runs a browser). It installs Docker, fetches the
+# app, generates a password and starts the app, the LinkedIn agent and Caddy (automatic HTTPS).
+# Takes about ten minutes after the instance boots.
 #
 # Optional: set your own domain before pasting (point its A record at the instance's static IP).
 DOMAIN=""
@@ -11,9 +12,9 @@ set -euo pipefail
 exec > /var/log/signalpipe-setup.log 2>&1
 export DEBIAN_FRONTEND=noninteractive
 
-# Small instances need swap to build the image.
+# Swap gives the build and the agent's browser room on a small instance.
 if ! swapon --show | grep -q /swapfile; then
-  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
@@ -48,6 +49,7 @@ cat > /root/signalpipe-info.txt <<EOF
 Signalpipe is running.
 Address:  https://$DOMAIN
 Password: $APP_PASSWORD
+LinkedIn: sign in once in Settings > "Open the agent's screen" (the agent then runs by itself)
 Settings: /opt/signalpipe/.env  (add API keys here, then run: cd /opt/signalpipe && docker compose up -d)
 Update:   cd /opt/signalpipe && git pull && docker compose up -d --build
 EOF

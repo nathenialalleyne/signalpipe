@@ -1,0 +1,17 @@
+{$DOMAIN} {
+	encode gzip
+
+	# The LinkedIn agent's browser window. Only people signed in to Signalpipe get through:
+	# Caddy asks the app whether the request's session is valid before passing it on.
+	handle_path /screen/* {
+		forward_auth app:8000 {
+			uri /api/auth/check
+			# The check itself is a plain request; passing on the WebSocket upgrade would make the app refuse it.
+			header_up -Upgrade
+			header_up -Connection
+		}
+		reverse_proxy agent:6080
+	}
+
+	reverse_proxy app:8000
+}

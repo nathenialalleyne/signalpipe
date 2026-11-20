@@ -111,4 +111,4 @@ http.createServer(async (req, res) => {
   const m = /^\/in\/([^/]+)\/$/.exec(p);
   if (m && PEOPLE[m[1]]) return send(200, profile(m[1]));
   send(404, page('Not found', '<main><section>Not found</section></main>'));
-}).listen(port, '127.0.0.1', () => console.log(`fake linkedin on ${port}`));
+}).listen(port, process.env.FAKE_HOST || '127.0.0.1', () => console.log(`fake linkedin on ${port}`));

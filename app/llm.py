@@ -14,6 +14,13 @@ last_error: str = ""
 _FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5", "claude-sonnet-5-5")
 
 
+def reset() -> None:
+    """Forget the client so the next call picks up a changed API key."""
+    global _client, last_error
+    _client = None
+    last_error = ""
+
+
 def available() -> bool:
     return config.status()["llm"]
 

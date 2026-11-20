@@ -11,11 +11,11 @@ import time
 from urllib.parse import quote
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import brain as brain_mod
-from . import config, db, enrich, insights, li_agent, linkedin, llm, outreach, pipeline, scoring, seo, validate, web
+from . import config, db, enrich, insights, li_agent, linkedin, llm, local_agent, mailsetup, outreach, pipeline, scoring, seo, validate, web
 from .collectors import SOURCE_INFO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -57,18 +57,41 @@ async def scheduler() -> None:
 
 
 @contextlib.asynccontextmanager
+def apply_connections() -> None:
+    """Make the values saved in Settings current (they take precedence over environment variables)."""
+    config.apply(db.get_setting("connections") or {})
+    linkedin.TZ = config.env("LINKEDIN_TZ", "America/New_York") or "America/New_York"
+    llm.reset()
+
+
 async def lifespan(app: FastAPI):
     db.conn()
+    apply_connections()
     task = asyncio.create_task(scheduler()) if config.env("SIGNALPIPE_SCHEDULER", "1") != "0" else None
     if not config.APP_PASSWORD:
         log.warning("APP_PASSWORD is not set: the app is open to anyone who can reach it")
+    if config.LOCAL and local_agent.wanted():
+        local_agent.start()
     yield
+    if config.LOCAL:
+        await local_agent.stop(remember=False)
     if task:
         task.cancel()
     await web.close()
 
 
 app = FastAPI(title="Signalpipe", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    """On a personal computer, answer only requests addressed to this computer. Stops a web page from
+    reaching Signalpipe through a look-alike domain that points back at 127.0.0.1 (DNS rebinding)."""
+    if config.LOCAL:
+        host = request.headers.get("host", "").rsplit(":", 1)[0].strip("[]").lower()
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            return JSONResponse({"error": "Signalpipe only answers on this computer"}, status_code=403)
+    return await call_next(request)
 
 
 # ---------- auth ----------
@@ -107,6 +130,22 @@ async def login(response: Response, body: dict = Body(...)):
     return {"ok": True}
 
 
+@app.get("/api/mode")
+async def mode():
+    return {"local": config.LOCAL}
+
+
+@app.get("/api/local-login")
+async def local_login(key: str = ""):
+    """The launcher opens the browser here with this computer's key; it signs the browser in and moves on."""
+    if not (config.LOCAL and config.APP_PASSWORD and hmac.compare_digest(key, config.APP_PASSWORD)):
+        raise HTTPException(401, "Open Signalpipe from its launcher to sign in")
+    ts = str(int(time.time()))
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie("sp_session", f"{ts}.{_sign(ts)}", max_age=365 * 86400, httponly=True, samesite="lax")
+    return resp
+
+
 @app.post("/api/logout")
 async def logout(response: Response):
     response.delete_cookie("sp_session")
@@ -116,13 +155,19 @@ async def logout(response: Response):
 api = Depends(auth)
 
 
+@app.get("/api/auth/check", dependencies=[api])
+async def auth_check():
+    """Used by the web server to guard the agent's screen: 200 for a signed-in session, 401 otherwise."""
+    return {"ok": True}
+
+
 # ---------- status ----------
 
 @app.get("/api/status", dependencies=[api])
 async def status():
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM leads GROUP BY status")}
     return {
-        "config": config.status(), "linkedin": linkedin.state(), "llm_error": llm.last_error, "send_mode": db.get_setting("send_mode", "copilot"),
+        "config": config.status(), "linkedin": {**linkedin.state(), "local_agent": local_agent.status()}, "llm_error": llm.last_error, "send_mode": db.get_setting("send_mode", "copilot"),
         "brain_ready": bool(brain_mod.get().get("one_liner")), "leads": counts,
         "plays": db.one("SELECT COUNT(*) n FROM plays")["n"],
         "signals_7d": db.one("SELECT COUNT(*) n FROM signals WHERE created_at>?", (db.now() - 7 * 86400,))["n"],
@@ -412,7 +457,7 @@ async def validate_phone(body: dict = Body(...)):
 async def outreach_queue(channel: str, status: str = "open"):
     if channel not in ("email", "linkedin", "call"):
         raise HTTPException(404)
-    cond = "m.status IN ('draft','queued','failed')" if status == "open" else "m.status IN ('sent','done','skipped')"
+    cond = "m.status IN ('draft','queued','sending','failed')" if status == "open" else "m.status IN ('sent','done','skipped')"
     rows = db.q(
         f"SELECT m.*, l.company_name, l.company_domain, l.score, l.status lead_status, l.linkedin_company_url, "
         f"c.name contact_name, c.title contact_title, c.email, c.email_status, c.phone, c.phone_detail, c.linkedin_url "
@@ -527,6 +572,61 @@ async def linkedin_sync():
 @app.get("/api/insights", dependencies=[api])
 async def get_insights(play_id: int = 0):
     return insights.report(play_id or None)
+
+
+# ---------- connections (keys and mailbox, entered in Settings) ----------
+
+@app.get("/api/connections", dependencies=[api])
+async def get_connections():
+    saved = db.get_setting("connections") or {}
+    out = {k: ("" if k in config.SECRETS else config.env(k)) for k in config.EDITABLE}
+    out["_secrets_set"] = sorted(k for k in config.SECRETS if config.env(k))
+    out["_saved_here"] = sorted(k for k, v in saved.items() if v)
+    return out
+
+
+@app.put("/api/connections", dependencies=[api])
+async def put_connections(body: dict = Body(...)):
+    """Save what was entered. A blank secret keeps the one already saved; list names in `clear` to remove them."""
+    saved = dict(db.get_setting("connections") or {})
+    for k in config.EDITABLE:
+        if k not in body:
+            continue
+        v = str(body[k] or "").strip()
+        if k in config.SECRETS and not v:
+            continue
+        if k in ("SMTP_PORT", "IMAP_PORT", "EMAIL_DAILY_CAP", "LINKEDIN_DAILY_CAP") and v and not v.isdigit():
+            raise HTTPException(400, f"{k} must be a number")
+        saved[k] = v
+    for k in body.get("clear") or []:
+        saved.pop(k, None)
+    db.set_setting("connections", saved)
+    apply_connections()
+    return await get_connections()
+
+
+@app.post("/api/connections/mail-guess", dependencies=[api])
+async def mail_guess(body: dict = Body(...)):
+    return await mailsetup.guess(body.get("email", ""))
+
+
+@app.post("/api/connections/test-mail", dependencies=[api])
+async def test_mail():
+    return await mailsetup.test()
+
+
+@app.post("/api/local/linkedin/start", dependencies=[api])
+async def local_linkedin_start():
+    if not config.LOCAL:
+        raise HTTPException(400, "Only when Signalpipe runs on your own computer")
+    local_agent.start()
+    return local_agent.status()
+
+
+@app.post("/api/local/linkedin/stop", dependencies=[api])
+async def local_linkedin_stop():
+    await local_agent.stop()
+    return local_agent.status()
 
 
 # ---------- local linkedin agent ----------
