@@ -531,3 +531,70 @@ def test_screen_link_only_on_server(monkeypatch):
     assert li_agent.status()["screen_url"].startswith("/screen/vnc.html")
     run(li_agent.apply_result({"kind": "blocked", "reason": "not signed in to LinkedIn"}))
     assert "Open the agent's screen" in db.get_setting("linkedin_error")
+
+
+# ---------- running on your own computer ----------
+
+def test_saved_connections_override_environment(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "env.example.com")
+    monkeypatch.setattr(config, "_from_env", {**config._from_env, "SMTP_HOST": "env.example.com", "SMTP_USER": None})
+    config.apply({"SMTP_HOST": "smtp.gmail.com", "SMTP_USER": "sam@acme.io", "SMTP_PORT": "465"})
+    assert (config.SMTP_HOST, config.SMTP_PORT, config.SMTP_FROM, config.IMAP_USER) == ("smtp.gmail.com", 465, "sam@acme.io", "sam@acme.io")
+    config.apply({})                                         # cleared in Settings: back to the environment's value
+    assert config.SMTP_HOST == "env.example.com" and config.SMTP_USER == ""
+
+
+def test_mail_guess_by_domain_and_mx():
+    from app import mailsetup
+    assert run(mailsetup.guess("sam@gmail.com"))["settings"]["SMTP_HOST"] == "smtp.gmail.com"
+    db.cache_set("mx:acme-m365.io", ["acme-m365-io.mail.protection.outlook.com"])
+    assert run(mailsetup.guess("sam@acme-m365.io"))["provider"] == "microsoft"
+    assert run(mailsetup.guess("sam@nomail.io"))["provider"] is None
+
+
+def _client(monkeypatch, local=True):
+    from fastapi.testclient import TestClient
+    from app import main
+    monkeypatch.setattr(config, "LOCAL", local)
+    monkeypatch.setattr(config, "APP_PASSWORD", "launcher-key")
+    monkeypatch.setattr(config, "SECRET_KEY", "s3cret")
+    monkeypatch.setattr(config, "API_TOKEN", "tok")
+    monkeypatch.setattr(main.config, "apply", lambda saved: None)  # keep this test's settings as set above
+    return TestClient(main.app, base_url="http://127.0.0.1:8777")
+
+
+def test_local_mode_signs_in_with_launcher_key_and_refuses_other_hosts(monkeypatch):
+    with _client(monkeypatch) as c:
+        assert c.get("/api/status").status_code == 401
+        assert c.get("/api/local-login", params={"key": "wrong"}).status_code == 401
+        r = c.get("/api/local-login", params={"key": "launcher-key"}, follow_redirects=False)
+        assert r.status_code == 303 and "sp_session" in r.cookies
+        assert c.get("/api/status").status_code == 200       # the cookie set above signs this browser in
+        assert c.get("/api/status", headers={"Host": "evil.example:8777"}).status_code == 403
+        assert c.get("/api/mode").json() == {"local": True}
+
+
+def test_connections_never_send_secrets_back(monkeypatch):
+    with _client(monkeypatch) as c:
+        h = {"Authorization": "Bearer tok"}
+        out = c.put("/api/connections", headers=h, json={"ANTHROPIC_API_KEY": "sk-ant-secret", "SMTP_USER": "sam@acme.io"}).json()
+        assert out["ANTHROPIC_API_KEY"] == "" and "sk-ant-secret" not in str(out)
+        assert db.get_setting("connections")["ANTHROPIC_API_KEY"] == "sk-ant-secret"
+        c.put("/api/connections", headers=h, json={"ANTHROPIC_API_KEY": ""})   # blank keeps the saved key
+        assert db.get_setting("connections")["ANTHROPIC_API_KEY"] == "sk-ant-secret"
+        c.put("/api/connections", headers=h, json={"clear": ["ANTHROPIC_API_KEY"]})
+        assert "ANTHROPIC_API_KEY" not in db.get_setting("connections")
+        assert c.put("/api/connections", headers=h, json={"SMTP_PORT": "abc"}).status_code == 400
+
+
+def test_local_agent_gets_only_what_it_needs(monkeypatch):
+    from app import local_agent
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("SMTP_PASS", "mail-pass")
+    monkeypatch.setattr(config, "API_TOKEN", "tok")
+    e = local_agent._env()
+    assert "ANTHROPIC_API_KEY" not in e and "SMTP_PASS" not in e
+    assert e["SIGNALPIPE_TOKEN"] == "tok" and e["LINKEDIN_PARENT_PIPE"] == "1" and e["LINKEDIN_LOCAL"] == "1"
+    node, core = local_agent.runtime()
+    assert os.path.exists(node) and os.path.exists(os.path.join(core, "index.js"))
+    assert local_agent.script().exists()

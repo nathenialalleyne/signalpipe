@@ -68,7 +68,13 @@ function frame(inner) {
   </nav>
   <main class="main" id="view">${inner}</main></div>`;
 }
-function renderLogin() {
+async function renderLogin() {
+  const m = await fetch('/api/mode').then((r) => r.json()).catch(() => ({}));
+  if (m.local) {
+    root.innerHTML = `<div class="login"><div class="card lg col" style="width:min(420px,100%)"><div class="brand" style="padding:0">Signalpipe</div>
+      <p>Signalpipe is running on this computer. To open it, start Signalpipe again the way you started it; it opens this page signed in.</p></div></div>`;
+    return;
+  }
   root.innerHTML = `<div class="login"><form class="card lg col" style="width:min(380px,100%)" data-form="login">
     <div class="brand" style="padding:0">Signalpipe</div>
     <label class="f">Password<input class="i" type="password" name="password" autocomplete="current-password" required></label>
@@ -262,34 +268,64 @@ async function viewBrain() {
 
 /* ---------- settings ---------- */
 async function viewSettings() {
-  const [st, sup] = await Promise.all([api('/status'), api('/suppression')]);
+  const [st, sup, cn] = await Promise.all([api('/status'), api('/suppression'), api('/connections')]);
   S.status = st;
-  const c = st.config, li = st.linkedin || {};
-  const rowS = (ok, name, on, off, env) => `<li class="row"><span class="pill ${ok ? 'mint' : 'draft'}">${ok ? 'On' : 'Off'}</span><b style="font-weight:600">${name}</b><span class="small soft grow">${esc(ok ? on : off)}</span><span class="mono soft">${esc(env)}</span></li>`;
-  frame(`${head('Keys live in environment variables, never in the database', 'Settings')}
-  <section class="card lg col"><h2>Connections</h2><ul class="clean">
-    ${rowS(c.llm, 'Claude', `Scoring and writing with ${c.llm_model}`, 'Keyword scoring and template messages only', 'ANTHROPIC_API_KEY')}
-    ${rowS(c.smtp, 'Outgoing mail', `Up to ${c.email_daily_cap} a day from your mailbox`, 'Approved emails will wait', 'SMTP_HOST SMTP_USER SMTP_PASS SMTP_FROM')}
-    ${rowS(c.imap, 'Reply detection', 'Replies stop sequences automatically', 'Replies will not be detected', 'IMAP_HOST IMAP_USER IMAP_PASS')}
-    ${rowS(c.smtp_probe, 'Mailbox verification', 'Each address is confirmed with its own mail server', 'Needs outbound port 25, which most clouds block until you ask', 'SMTP_PROBE=1')}
-    ${rowS(c.hunter, 'Hunter', 'Finds named contacts and verifies mailboxes for you', 'Optional paid alternative to the built-in verification', 'HUNTER_API_KEY')}
-    ${rowS(c.twilio_lookup, 'Carrier phone lookup', 'Twilio confirms line type per number', 'Line type comes from the number plan only', 'TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN')}
-    ${rowS(c.postal_address, 'Postal address in footer', 'Included in every email', 'Required by US law for commercial email', 'POSTAL_ADDRESS')}
-    ${rowS(c.auth, 'Password', 'Sign-in required', 'Anyone who can reach this address can use it', 'APP_PASSWORD')}</ul>
-    ${c.smtp ? '<div class="row"><button class="btn sm" data-act="testEmail">Send myself a test email</button></div>' : ''}</section>
-  <section class="card lg col"><h2>LinkedIn</h2>
-    ${li.via === 'agent' ? `<p class="small"><span class="pill ${li.agent.blocked ? 'blush' : li.agent.online ? 'mint' : 'butter'}">${li.agent.blocked ? 'Needs you' : li.agent.online ? 'Agent running' : 'Agent offline'}</span> ${li.agent.blocked ? esc(li.agent.blocked) + (li.agent.on_server ? '. Open the agent\'s screen below and sign in there; it carries on by itself afterwards.' : '. Start the agent again and sign in in its window.') : `${li.agent.on_server ? 'The agent on this server is doing the LinkedIn steps.' : 'Your own Chrome is doing the LinkedIn steps.'} Last check-in ${ago(li.agent.last_seen)}. ${li.sent_this_week} of ${li.weekly_cap} invites used this week.`}</p>`
+  const c = st.config, li = st.linkedin || {}, lo = li.local_agent || {};
+  const isSet = (k) => (cn._secrets_set || []).includes(k);
+  const field = (k, label, opts = {}) => {
+    const secret = opts.secret;
+    const ph = secret ? (isSet(k) ? 'Saved. Type to replace.' : (opts.ph || '')) : (opts.ph || '');
+    return `<label class="f ${opts.cls || ''}">${label}<input class="i" name="${k}" type="${secret ? 'password' : opts.type || 'text'}" ${secret ? 'autocomplete="new-password"' : ''} value="${secret ? '' : esc(cn[k] || '')}" placeholder="${esc(ph)}" ${opts.attrs || ''}></label>`;
+  };
+  const pill = (ok, on = 'On', off = 'Not set up') => `<span class="pill ${ok ? 'mint' : 'draft'}">${ok ? on : off}</span>`;
+  const ag = li.agent || {};
+  const liState = lo.available
+    ? (!lo.on ? `<p class="small soft">Not connected. LinkedIn steps wait in a queue for you to send by hand.</p>
+        <p class="small">Press Connect and a Chrome window opens on LinkedIn's sign-in page. Sign in there once; Signalpipe keeps that window and does the LinkedIn steps in it while this app is running. It is a separate Chrome profile, so your everyday browsing is not affected.</p>`
+      : `<p class="small"><span class="pill ${ag.blocked ? 'blush' : ag.online ? 'mint' : 'butter'}">${ag.blocked ? 'Needs you' : ag.online ? 'Connected' : 'Starting'}</span> ${ag.blocked ? esc(ag.blocked) + '. Finish it in the Signalpipe Chrome window; it carries on by itself.' : ag.online ? `Working in its own Chrome window on this computer. ${li.sent_this_week} of ${li.weekly_cap} invites used this week.` : 'Opening its Chrome window. If LinkedIn shows its sign-in page, sign in there.'}</p>`)
+    : li.via === 'agent' ? `<p class="small"><span class="pill ${ag.blocked ? 'blush' : ag.online ? 'mint' : 'butter'}">${ag.blocked ? 'Needs you' : ag.online ? 'Agent running' : 'Agent offline'}</span> ${ag.blocked ? esc(ag.blocked) + (ag.on_server ? '. Open the agent\'s screen below and sign in there; it carries on by itself afterwards.' : '. Start the agent again and sign in in its window.') : `${ag.on_server ? 'The agent on this server is doing the LinkedIn steps.' : 'Your own Chrome is doing the LinkedIn steps.'} Last check-in ${ago(ag.last_seen)}. ${li.sent_this_week} of ${li.weekly_cap} invites used this week.`}</p>`
     : li.via === 'provider' ? `<p class="small"><span class="pill mint">Connected</span> ${li.account ? 'Signed in as ' + esc(li.account) + '. ' : ''}${li.sent_this_week} of ${li.weekly_cap} invites used this week.</p>`
-    : `<p class="small soft">Not connected, so LinkedIn steps wait in a queue for you to send by hand. Two ways to make it hands-off:</p>
-       <ul class="small soft" style="margin:0;padding-left:18px"><li><b style="font-weight:600;color:var(--text)">Agent on your computer (free).</b> Run <span class="mono">node linkedin-agent.mjs run</span> from the <span class="mono">agent</span> folder, sign in once in the Chrome window it opens, and it works while your computer is on.</li>
-       <li><b style="font-weight:600;color:var(--text)">Unipile (paid, always on).</b> Set <span class="mono">UNIPILE_DSN</span> and <span class="mono">UNIPILE_API_KEY</span>, then connect here.</li></ul>`}
-    <p class="small soft">Automated LinkedIn activity is against LinkedIn's terms. The caps are set low on purpose, and the agent stops if LinkedIn asks for a security check.</p>
-    ${li.agent?.screen_url ? `<div class="row"><a class="btn ${li.agent.blocked ? 'primary' : ''}" href="${esc(li.agent.screen_url)}" target="_blank" rel="noopener">Open the agent's screen</a><span class="small soft">Its browser window on the server. Use it to sign in once, or when LinkedIn asks for a security check.</span></div>` : ''}
+    : `<p class="small soft">Not connected, so LinkedIn steps wait in a queue for you to send by hand. See the README for running the LinkedIn agent with a server deployment.</p>`;
+  frame(`${head(c.local ? 'Saved on this computer only' : 'Saved here; these take precedence over environment variables', 'Settings')}
+  <section class="card lg col"><div class="row between"><h2>Claude</h2>${pill(c.llm)}</div>
+    <p class="small soft">Scores leads against your customer profile and writes your messages. Without a key, scoring is keyword matching and messages are plain templates. Create a key in the Claude Console under API keys.</p>
+    <form class="row" data-form="conn" style="align-items:flex-end">${field('ANTHROPIC_API_KEY', 'API key', { secret: true, ph: 'sk-ant-...', cls: 'grow' })}<button class="btn primary">Save</button></form></section>
+
+  <section class="card lg col"><div class="row between"><h2>Email</h2><span class="row" style="gap:6px">${pill(c.smtp, 'Sending on', 'Sending off')}${pill(c.imap, 'Replies on', 'Replies off')}</span></div>
+    <p class="small soft">Emails go out from your own mailbox, and replies are read from it so a sequence stops when someone answers.</p>
+    <form class="col" data-form="conn" id="mailForm" style="gap:12px">
+      <div class="grid2">${field('SMTP_USER', 'Your email address', { type: 'email', ph: 'you@yourcompany.com', attrs: 'data-change="mailGuess"' })}${field('SMTP_PASS', 'App password', { secret: true })}</div>
+      <div id="mailHint" class="small soft"></div>
+      <div class="grid2">${field('SMTP_FROM_NAME', 'Name people see', { ph: 'Sam Lee' })}${field('POSTAL_ADDRESS', 'Postal address for the footer', { ph: 'Required in commercial email in the US' })}</div>
+      <details><summary class="small" style="cursor:pointer">Server settings (filled in for you when we recognise your provider)</summary>
+        <div class="grid2" style="margin-top:12px">${field('SMTP_HOST', 'Outgoing server (SMTP)')}${field('SMTP_PORT', 'Port', { type: 'number' })}
+        <label class="f">Security<select class="i" name="SMTP_SECURITY">${['starttls', 'ssl', 'none'].map((v) => `<option ${(cn.SMTP_SECURITY || 'starttls') === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        ${field('IMAP_HOST', 'Incoming server (IMAP)')}${field('IMAP_PORT', 'Port', { type: 'number' })}${field('EMAIL_DAILY_CAP', 'Most emails per day', { type: 'number', ph: '30' })}</div></details>
+      <div class="row"><button class="btn primary">Save</button><button type="button" class="btn" data-act="testMail">Save and test</button>${c.smtp ? '<button type="button" class="btn" data-act="testEmail">Send myself a test email</button>' : ''}</div>
+      <div id="mailTest"></div></form></section>
+
+  <section class="card lg col"><div class="row between"><h2>LinkedIn</h2>${lo.available ? (lo.on ? '<button class="btn" data-act="localLiStop">Disconnect</button>' : '<button class="btn primary" data-act="localLiStart">Connect LinkedIn</button>') : ''}</div>
+    ${liState}
+    ${lo.available ? `<details><summary class="small" style="cursor:pointer">Optional: let it sign itself back in</summary>
+      <p class="small soft" style="margin:8px 0">Only needed if LinkedIn signs it out. These are typed into LinkedIn's own sign-in page in that window and are stored only on this computer. LinkedIn may still ask you for a code, which you enter in the window.</p>
+      <form class="row" data-form="conn" style="align-items:flex-end">${field('LINKEDIN_EMAIL', 'LinkedIn email', { cls: 'grow' })}${field('LINKEDIN_PASSWORD', 'LinkedIn password', { secret: true, cls: 'grow' })}<button class="btn">Save</button></form></details>` : ''}
+    <p class="small soft">Automated LinkedIn activity is against LinkedIn's terms. The caps are low on purpose, and it stops whenever LinkedIn asks for a security check.</p>
+    ${ag.screen_url ? `<div class="row"><a class="btn ${ag.blocked ? 'primary' : ''}" href="${esc(ag.screen_url)}" target="_blank" rel="noopener">Open the agent's screen</a><span class="small soft">Its browser window on the server. Use it to sign in once, or when LinkedIn asks for a security check.</span></div>` : ''}
     <div class="row">${li.via === 'provider' ? '<button class="btn" data-act="liSync">Check for accepts and replies</button><button class="btn danger" data-act="liDisconnect">Stop using this account</button>' : li.provider_ready && !li.enabled ? '<button class="btn primary" data-act="liConnect">Connect LinkedIn</button><button class="btn" data-act="liRefresh">Check connection</button>' : ''}</div></section>
+
+  <details class="card lg"><summary style="cursor:pointer"><h2 style="display:inline">More options</h2></summary>
+    <form class="col" data-form="conn" style="gap:12px;margin-top:16px">
+      <div class="grid2">${field('LINKEDIN_DAILY_CAP', 'Most LinkedIn invites per day', { type: 'number', ph: '20' })}${field('LINKEDIN_TZ', 'Your time zone (LinkedIn works your hours)', { ph: 'America/New_York' })}
+      ${field('HUNTER_API_KEY', 'Hunter API key (optional, paid)', { secret: true })}</div>
+      <div class="row"><button class="btn">Save</button></div></form>
+    <ul class="clean small" style="margin-top:16px">
+      <li class="row">${pill(c.smtp_probe)}<span>Mailbox verification with each address's own mail server (needs outbound port 25)</span></li>
+      <li class="row">${pill(c.twilio_lookup)}<span>Carrier phone lookup through Twilio</span></li>
+      ${c.local ? '' : `<li class="row">${pill(c.auth)}<span>Password sign-in</span></li>`}</ul></details>
   <section class="card lg col"><h2>Check an address or number</h2><form class="row" data-form="check"><input class="i grow" name="value" placeholder="name@company.com or +1 415 555 0132" aria-label="Email or phone"><button class="btn">Check</button></form><div id="checkOut"></div></section>
   <section class="card lg col"><h2>Do not contact</h2><form class="row" data-form="suppress"><input class="i grow" name="value" placeholder="address or whole domain" aria-label="Address or domain"><button class="btn">Add</button></form>
     ${sup.length ? `<ul class="clean small">${sup.map((s) => `<li class="row between"><span><span class="mono">${esc(s.value)}</span> <span class="soft">${esc(s.reason || '')}</span></span><button class="btn sm" data-act="unsuppress" data-id="${esc(s.value)}">Remove</button></li>`).join('')}</ul>` : '<p class="small soft">Empty. Unsubscribe replies are added here automatically.</p>'}</section>
-  ${c.auth ? '<div class="row"><button class="btn" data-act="logout">Sign out</button></div>' : ''}`);
+  ${c.auth && !c.local ? '<div class="row"><button class="btn" data-act="logout">Sign out</button></div>' : ''}`);
 }
 
 /* ---------- router ---------- */
@@ -342,6 +378,17 @@ const A = {
   liDisconnect: async () => { if (!confirm('Stop using this LinkedIn account here?')) return; await api('/linkedin/disconnect', { method: 'POST' }); return render(); },
   liSync: async () => { const r = await api('/linkedin/sync', { method: 'POST' }); toast(r.error || `${r.accepted || 0} accepted, ${r.replies || 0} replies.`); return render(); },
   unsuppress: async (id) => { await api('/suppression/' + encodeURIComponent(id), { method: 'DELETE' }); return render(); },
+  localLiStart: async (_, btn) => { btn.disabled = true; await api('/local/linkedin/start', { method: 'POST' }); toast('Opening a Chrome window on LinkedIn. Sign in there once.'); setTimeout(render, 4000); return render(); },
+  localLiStop: async () => { if (!confirm('Disconnect LinkedIn? Its Chrome window closes and LinkedIn steps wait in the queue for you.')) return; await api('/local/linkedin/stop', { method: 'POST' }); return render(); },
+  testMail: async (_, btn) => {
+    const f = document.getElementById('mailForm');
+    btn.disabled = true; btn.textContent = 'Testing';
+    await api('/connections', { method: 'PUT', body: Object.fromEntries(new FormData(f).entries()) });
+    const r = await api('/connections/test-mail', { method: 'POST' });
+    await render();
+    const out = document.getElementById('mailTest');
+    if (out) out.innerHTML = Object.entries(r).map(([k, v]) => `<div class="row small" style="gap:8px"><span class="pill ${v.ok ? 'mint' : 'blush'}">${k === 'sending' ? 'Sending' : 'Replies'}</span>${esc(v.message)}</div>`).join('');
+  },
   logout: async () => { await api('/logout', { method: 'POST' }); renderLogin(); },
 };
 root.addEventListener('click', (e) => {
@@ -353,6 +400,15 @@ root.addEventListener('click', (e) => {
 root.addEventListener('change', guard(async (e) => {
   const el = e.target.closest('[data-change]');
   if (!el) return;
+  if (el.dataset.change === 'mailGuess' && el.value.includes('@')) {
+    const g = await api('/connections/mail-guess', { method: 'POST', body: { email: el.value } });
+    const f = el.form, hint = document.getElementById('mailHint');
+    if (g.settings) {
+      for (const [k, v] of Object.entries(g.settings)) { const i = f.elements[k]; if (i && (!i.value || i.dataset.auto)) { i.value = v; i.dataset.auto = '1'; } }
+    }
+    if (hint) hint.innerHTML = g.provider ? `<span class="pill sky">${esc(g.label)}</span> ${esc(g.help)}` : esc(g.help);
+    return;
+  }
   if (el.dataset.change === 'insightPlay') { S.insightPlay = +el.value; return render(); }
   if (el.dataset.change === 'leadStatus') { await api(`/leads/${S.leadId}/status`, { method: 'POST', body: { status: el.value } }); return render(); }
   if (el.dataset.change === 'outcome' && el.value) { await api('/messages/' + el.dataset.id, { method: 'PUT', body: { ...(await saveField(el.dataset.id)), action: 'done', outcome: el.value } }); return render(); }
@@ -377,6 +433,11 @@ root.addEventListener('submit', guard(async (e) => {
     await api('/plays/' + f.dataset.id, { method: 'PUT', body: { name: fd.get('name'), status: fd.get('status'), config } }); toast('Saved.'); return render();
   }
   if (kind === 'seo') { btn.disabled = true; btn.textContent = 'Crawling, about a minute'; await api('/seo/audit', { method: 'POST', body: { url: fd.get('url') } }); return render(); }
+  if (kind === 'conn') {
+    await api('/connections', { method: 'PUT', body: Object.fromEntries(fd.entries()) });
+    toast('Saved.');
+    return render();
+  }
   if (kind === 'suppress') { await api('/suppression', { method: 'POST', body: { value: fd.get('value') } }); return render(); }
   if (kind === 'check') {
     const v = String(fd.get('value')).trim(), out = document.getElementById('checkOut');

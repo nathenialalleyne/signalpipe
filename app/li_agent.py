@@ -143,7 +143,10 @@ async def apply_result(r: dict) -> dict:
     if kind == "blocked":  # LinkedIn showed a sign-in or verification page: stop and wait for the person
         why = (r.get("reason") or "LinkedIn asked you to sign in or verify")[:200]
         db.set_setting("li_agent_blocked", why)
-        if on_server():
+        if config.LOCAL:
+            db.set_setting("linkedin_error", f"LinkedIn needs you: {why}. Finish it in the Chrome window "
+                                             "Signalpipe opened; it carries on by itself afterwards.")
+        elif on_server():
             db.set_setting("linkedin_error", f"LinkedIn agent is waiting for you: {why}. Open Settings, "
                                              "then \"Open the agent's screen\", and sign in there.")
         else:

@@ -82,10 +82,16 @@ async function api(method, route, body) {
 
 function findChrome() {
   if (cfg.chromePath) return cfg.chromePath;
-  const places = process.platform === 'darwin' ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
-    : process.platform === 'win32' ? [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter(Boolean)
-      .map((d) => path.join(d, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
+  // Chrome first; Edge and Chromium are the same engine and work the same way.
+  const win = [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter(Boolean);
+  const places = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium']
+    : process.platform === 'win32'
+      ? [...win.map((d) => path.join(d, 'Google', 'Chrome', 'Application', 'chrome.exe')),
+        ...win.map((d) => path.join(d, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))]
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+        '/snap/bin/chromium', '/usr/bin/microsoft-edge'];
   return places.find((f) => fs.existsSync(f)) || '';
 }
 
@@ -99,7 +105,9 @@ const freePort = () => new Promise((resolve, reject) => {
 async function launch(headless = cfg.headless) {
   const load = createRequire(import.meta.url);
   let pw;
-  try { pw = load('playwright-core'); } catch { pw = load('playwright'); }
+  // PLAYWRIGHT_CORE: the copy bundled with the Python Playwright package, used when Signalpipe runs locally.
+  if (env.PLAYWRIGHT_CORE) pw = load(env.PLAYWRIGHT_CORE);
+  else { try { pw = load('playwright-core'); } catch { pw = load('playwright'); } }
   fs.mkdirSync(cfg.profileDir, { recursive: true });
   if (cfg.mode === 'launch') {
     const ctx = await pw.chromium.launchPersistentContext(cfg.profileDir, {
@@ -503,7 +511,7 @@ async function cmdDoctor(url) {
  *  in the agent's window. Nothing is navigated or typed while waiting. */
 async function waitForPerson(page, reason) {
   await api('POST', '/result', { kind: 'blocked', reason }).catch((e) => log('could not report:', e.message));
-  log(`Waiting for you: ${reason}. Open the agent's screen from the dashboard.`);
+  log(`Waiting for you: ${reason}. ${env.LINKEDIN_LOCAL === '1' ? 'Finish it in this Chrome window.' : "Open the agent's screen from the dashboard."}`);
   let clear = 0, beat = Date.now();
   while (clear < 2) {
     await new Promise((r) => setTimeout(r, 10000));
@@ -528,6 +536,11 @@ async function cmdRun() {
   const stop = async (code) => { await close().catch(() => {}); process.exit(code); };
   process.on('SIGINT', () => stop(0));
   process.on('SIGTERM', () => stop(0));
+  if (env.LINKEDIN_PARENT_PIPE === '1') {  // started by Signalpipe: close the browser when Signalpipe quits, on any OS
+    process.stdin.on('end', () => stop(0));
+    process.stdin.on('close', () => stop(0));
+    process.stdin.resume();
+  }
   if (serverMode) {
     if (!(await ensureSignedIn(page, false))) {
       if (onBlockedPage(page) && !/\/login/.test(new URL(page.url()).pathname)) await waitForPerson(page, 'LinkedIn asked for a security check');

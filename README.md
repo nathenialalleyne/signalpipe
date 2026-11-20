@@ -75,6 +75,38 @@ One container, one SQLite file, no build step.
 
 ## Run it
 
+### On your own computer (recommended)
+
+1. On the repository's GitHub page, press **Code**, then **Download ZIP**, and unzip it anywhere.
+2. Start it:
+   - **Mac**: double-click `start-mac.command`. The first time, macOS may say it is from an unidentified
+     developer: right-click it, choose **Open**, then **Open** again.
+   - **Windows**: double-click `start-windows.bat`. If Windows says it protected your PC, choose
+     **More info**, then **Run anyway**.
+   - **Linux**: run `./start-linux.sh`.
+
+   The first start installs [uv](https://docs.astral.sh/uv/) (which sets up the right Python) and
+   Signalpipe's packages, then opens Signalpipe in your browser. Later starts take seconds.
+3. In **Settings**: paste a Claude API key, type your email address (the server settings fill in for
+   known providers) and an app password, press **Save and test**, then press **Connect LinkedIn** and
+   sign in once in the Chrome window that opens.
+4. In **Brain**, enter your website. In **Plays**, create a play and press **Run now**.
+
+Keep the launcher's window open while you use Signalpipe; close it to stop. Starting it again while it
+runs just opens the browser. Plays run, emails go out and LinkedIn steps happen only while it is
+running and your computer is awake.
+
+Everything stays on your computer in `~/.signalpipe`: the database (including the keys you enter in
+Settings), the LinkedIn agent's Chrome profile and its log. The app only answers on this computer, and
+the browser is signed in with a key from that folder. LinkedIn sees your normal home or office
+connection, the same one you use LinkedIn from yourself. It needs Chrome, Edge or Chromium installed.
+
+To update, download the ZIP again (or `git pull`) and start it the same way; your data is untouched.
+
+If the Mac launcher will not open at all, open Terminal in that folder and run `bash start-linux.sh`.
+
+### On a server
+
 ```bash
 cp .env.example .env
 ```
@@ -245,6 +277,13 @@ resolution, site enrichment, email MX validation, phone validation, the SEO craw
 auth, the MCP tools, and the UI in a headless browser. Sequences, SMTP sending (against a local SMTP
 server), reply, bounce and unsubscribe handling, CSV import and the LinkedIn flow (against a fake of
 Unipile's documented responses) are covered by `tests/`.
+
+The local setup was run end to end on Linux from a clean copy: the launcher installed everything with
+uv and started the app; the app refused look-alike hosts and unsigned requests and signed the browser
+in with the launcher's key; Connect LinkedIn started the agent with the runtime bundled in the Python
+Playwright package, which signed in to the stand-in site and sent invites and a follow-up; starting it a
+second time opened the running copy; quitting closed the LinkedIn browser too. The Mac and Windows
+launchers have not been run, for lack of a Mac or Windows machine.
 
 Written from the vendors' documentation but not yet run against a real account: Claude calls (no API
 key was available), Unipile, Hunter, Twilio Lookup, GitHub stargazers, and IMAP polling.
